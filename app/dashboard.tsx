@@ -51,6 +51,30 @@ function toneFor(listing: Listing) {
   return "neutral";
 }
 
+function contactParts(value?: string | null) {
+  const parts = (value ?? "").split(/[;\n]/).map((part) => part.trim()).filter(Boolean);
+  const emails = Array.from(new Set(parts.filter((part) => /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/.test(part))));
+  const seenPhones = new Set<string>();
+  const phones = parts.filter((part) => {
+    if (part.includes("/") || /https?:|www\./i.test(part)) return false;
+    const digits = part.replace(/\D/g, "");
+    if (digits.length < 7 || digits === "20052026") return false;
+    const key = digits.slice(-8);
+    if (seenPhones.has(key)) return false;
+    seenPhones.add(key);
+    return true;
+  });
+  return { phones, emails };
+}
+
+function phoneHref(value: string) {
+  const digits = value.replace(/\D/g, "");
+  if (value.trim().startsWith("+")) return `+${digits}`;
+  if (digits.startsWith("382")) return `+${digits}`;
+  if (digits.startsWith("0")) return `+382${digits.slice(1)}`;
+  return `+382${digits}`;
+}
+
 function Icon({ children }: { children: React.ReactNode }) {
   return <span className="icon">{children}</span>;
 }
@@ -68,6 +92,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [statusDraft, setStatusDraft] = useState<Status>("New");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
+  const [copiedContact, setCopiedContact] = useState("");
 
   const listings = data.listings;
   const validPrices = listings
@@ -84,7 +109,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const result = listings.filter((l) => {
-      const matchesQuery = !q || [l.title, l.source_listing_id, l.normalized_location, l.agency_name].some((v) => v?.toLowerCase().includes(q));
+      const matchesQuery = !q || [l.title, l.source_listing_id, l.normalized_location, l.agency_name, l.public_contact].some((v) => v?.toLowerCase().includes(q));
       return matchesQuery
         && (location === "All locations" || l.normalized_location === location)
         && (status === "All statuses" || l.current_status === status)
@@ -121,6 +146,17 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     setNotice("");
   };
 
+  const copyContact = async (value: string, event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedContact(value);
+      window.setTimeout(() => setCopiedContact((current) => current === value ? "" : current), 1600);
+    } catch {
+      setCopiedContact("");
+    }
+  };
+
   const saveStatus = async () => {
     if (!selected || statusDraft === selected.current_status) return;
     setSaving(true); setNotice("");
@@ -154,7 +190,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </nav>
         <div className="sidebar-note">
           <span className="pulse" />
-          <div><strong>{data.dataMode === "live" ? "Supabase live" : "Preview mode"}</strong><small>Baseline · 18 Aug 2026</small></div>
+          <div><strong>{data.dataMode === "live" ? "Supabase live" : "Preview mode"}</strong><small>Latest · {shortDate(data.latest_scan.started_at)}</small></div>
         </div>
         <div className="sidebar-footer"><span>Phase 1 alpha</span><small>Bar · Montenegro</small></div>
       </aside>
@@ -165,7 +201,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           <div className="scan-chip"><span>Last scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
-        {data.dataMode === "preview" && <div className="preview-banner"><strong>Design preview</strong> — the deployed private site loads all 150 live Supabase records.</div>}
+        {data.dataMode === "preview" && <div className="preview-banner"><strong>Design preview</strong> — the deployed private site loads all {trackedCount} live Supabase records.</div>}
 
         {tab === "overview" && <>
           <section className="metric-grid">
@@ -218,8 +254,13 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             <label className="toggle"><input type="checkbox" checked={targetOnly} onChange={(e) => setTargetOnly(e.target.checked)} /><span />≤ €2,300</label>
             <label className="toggle"><input type="checkbox" checked={cleanOnly} onChange={(e) => setCleanOnly(e.target.checked)} /><span />Clean only</label>
           </div>
-          <div className="table-wrap"><table><thead><tr><th>Property</th><th>Location</th><th>Price</th><th>Area</th><th>€/m²</th><th>Signal</th><th>Status</th></tr></thead><tbody>
-            {filtered.map((listing) => <tr key={listing.id} onClick={() => openListing(listing)}><td><strong>{listing.title || "Untitled listing"}</strong><small>Realitica #{listing.source_listing_id}{listing.possible_duplicate ? " · possible duplicate" : ""}</small></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>)}
+          <div className="table-wrap"><table><thead><tr><th>Property</th><th>Location</th><th>Price</th><th>Area</th><th>€/m²</th><th>Contact</th><th>Signal</th><th>Status</th></tr></thead><tbody>
+            {filtered.map((listing) => {
+              const contacts = contactParts(listing.public_contact);
+              const primaryPhone = contacts.phones[0];
+              const primaryEmail = contacts.emails[0];
+              return <tr key={listing.id} onClick={() => openListing(listing)}><td><strong>{listing.title || "Untitled listing"}</strong><small>Realitica #{listing.source_listing_id}{listing.possible_duplicate ? " · possible duplicate" : ""}</small></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><div className="contact-mini">{primaryPhone && <a href={`tel:${phoneHref(primaryPhone)}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${primaryPhone}`} title={`Call ${primaryPhone}`}>☎</a>}{primaryEmail && <a href={`mailto:${primaryEmail}`} onClick={(e) => e.stopPropagation()} aria-label={`Email ${primaryEmail}`} title={`Email ${primaryEmail}`}>✉</a>}{(primaryPhone || primaryEmail) && <button onClick={(e) => copyContact(primaryPhone || primaryEmail, e)} aria-label="Copy contact" title="Copy contact">{copiedContact === (primaryPhone || primaryEmail) ? "✓" : "⎘"}</button>}{!primaryPhone && !primaryEmail && <span>—</span>}</div></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>;
+            })}
           </tbody></table>{!filtered.length && <div className="empty">No listings match these filters.</div>}</div>
         </section>}
 
@@ -245,7 +286,15 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         <section className="drawer-section"><span>PROPERTY EVIDENCE</span><dl><div><dt>Floor</dt><dd>{selected.floor ?? "—"}{selected.total_floors ? ` / ${selected.total_floors}` : ""}</dd></div><div><dt>Condition</dt><dd>{selected.building_condition ?? "—"}</dd></div><div><dt>Seller</dt><dd>{selected.seller_type}{selected.agency_name ? ` · ${selected.agency_name}` : ""}</dd></div><div><dt>Published</dt><dd>{shortDate(selected.source_published_at)}</dd></div><div><dt>Modified</dt><dd>{shortDate(selected.source_modified_at)}</dd></div><div><dt>Confidence</dt><dd>{selected.extraction_confidence}</dd></div></dl></section>
         <section className="drawer-section"><span>DESCRIPTION</span><p className="description">{selected.description_raw || "No description captured."}</p></section>
         <section className="drawer-section"><span>PRICE HISTORY</span>{selected.price_history?.length ? <div className="timeline">{selected.price_history.map((event, i) => <div key={`${event.observed_at}-${i}`}><i /><strong>{money(event.price_value)}</strong><small>{shortDate(event.observed_at)}{event.change_percent != null ? ` · ${event.change_percent.toFixed(1)}%` : " · baseline"}</small></div>)}</div> : <p className="muted">No trusted price event—the source value needs verification.</p>}</section>
-        <section className="drawer-section"><span>PUBLIC CONTACT</span><p>{selected.public_contact || "Not identified"}</p></section>
+        <section className="drawer-section"><span>PUBLIC CONTACT</span>{(() => {
+          const contacts = contactParts(selected.public_contact);
+          if (!contacts.phones.length && !contacts.emails.length) return <p className="muted">Not identified on the public listing.</p>;
+          return <div className="contact-stack">
+            {contacts.phones.map((phone) => <div className="contact-card" key={phone}><div><i>PHONE</i><strong>{phone}</strong></div><div className="contact-actions"><a href={`tel:${phoneHref(phone)}`}>Call</a><a href={`https://wa.me/${phoneHref(phone).replace(/\D/g, "")}`} target="_blank" rel="noreferrer">WhatsApp</a><button onClick={() => copyContact(phone)}>{copiedContact === phone ? "Copied" : "Copy"}</button></div></div>)}
+            {contacts.emails.map((email) => <div className="contact-card" key={email}><div><i>EMAIL</i><strong>{email}</strong></div><div className="contact-actions"><a href={`mailto:${email}`}>Email</a><button onClick={() => copyContact(email)}>{copiedContact === email ? "Copied" : "Copy"}</button></div></div>)}
+            <small className="contact-source">Public source contact · verify before outreach</small>
+          </div>;
+        })()}</section>
         <a className="source-link" href={selected.canonical_url} target="_blank" rel="noreferrer">Open original Realitica listing ↗</a>
       </aside></div>}
     </div>

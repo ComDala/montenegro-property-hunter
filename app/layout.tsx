@@ -3,10 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Montenegro Property Hunter",
-  description: "Private acquisition intelligence for Bar apartments.",
-  other: {
-    "codex-preview": "development",
-  },
+  description: "Private multi-source acquisition intelligence for Bar apartments.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

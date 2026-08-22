@@ -20,6 +20,26 @@ const priceBands = [
 const euro = new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("en-IE", { maximumFractionDigits: 0 });
 
+const SOURCE_LABELS: Record<string, string> = {
+  realitica: "Realitica",
+  indomio: "Indomio",
+  freshestate: "Fresh Estate",
+  montenegroprospects: "Montenegro Prospects",
+  amfora: "Amfora Property",
+  montebase: "MonteBase",
+  cmm: "CMM Montenegro",
+};
+
+function sourceLabel(value?: string | null) {
+  if (!value) return "Unknown source";
+  return SOURCE_LABELS[value] ?? value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function csvCell(value: unknown) {
+  const text = value == null ? "" : Array.isArray(value) ? value.join(" | ") : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 function money(value: number | null) {
   return value == null ? "—" : euro.format(value);
 }
@@ -83,15 +103,19 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [data, setData] = useState(initialData);
   const [tab, setTab] = useState<"overview" | "listings" | "review">("overview");
   const [query, setQuery] = useState("");
+  const [source, setSource] = useState("All sources");
   const [location, setLocation] = useState("All locations");
   const [status, setStatus] = useState("All statuses");
+  const [priceBand, setPriceBand] = useState("All price bands");
   const [targetOnly, setTargetOnly] = useState(false);
   const [cleanOnly, setCleanOnly] = useState(false);
+  const [issuesOnly, setIssuesOnly] = useState(false);
   const [sort, setSort] = useState("ppsqm-asc");
   const [selected, setSelected] = useState<Listing | null>(null);
   const [statusDraft, setStatusDraft] = useState<Status>("New");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
+  const [exportNotice, setExportNotice] = useState("");
   const [copiedContact, setCopiedContact] = useState("");
 
   const listings = data.listings;
@@ -99,22 +123,33 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     .filter((l) => l.clean_baseline_eligible)
     .map((l) => l.calculated_price_per_m2)
     .filter((v): v is number => v != null);
-  const trackedCount = data.latest_scan.listings_discovered ?? listings.length;
+  const trackedCount = listings.length;
   const reviewCount = listings.filter((l) => l.current_status === "Review").length;
   const targetCount = listings.filter((l) => (l.calculated_price_per_m2 ?? Infinity) <= 2300).length;
   const suspiciousCount = listings.filter((l) => (l.calculated_price_per_m2 ?? Infinity) < 1500).length;
 
+  const sources = useMemo(() => ["All sources", ...Array.from(new Set(listings.map((l) => l.source).filter(Boolean))).sort()], [listings]);
   const locations = useMemo(() => ["All locations", ...Array.from(new Set(listings.map((l) => l.normalized_location).filter(Boolean) as string[])).sort()], [listings]);
+  const activeDuplicates = useMemo(() => data.duplicates.filter((d) => d.review_status !== "Not Duplicate"), [data.duplicates]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const result = listings.filter((l) => {
       const matchesQuery = !q || [l.title, l.source_listing_id, l.normalized_location, l.agency_name, l.public_contact].some((v) => v?.toLowerCase().includes(q));
+      const unitPrice = l.calculated_price_per_m2;
+      const matchesBand = priceBand === "All price bands"
+        || (priceBand === "≤ €2,000/m²" && unitPrice != null && unitPrice <= 2000)
+        || (priceBand === "€2,001–2,300/m²" && unitPrice != null && unitPrice > 2000 && unitPrice <= 2300)
+        || (priceBand === "> €2,300/m²" && unitPrice != null && unitPrice > 2300)
+        || (priceBand === "Price/area unresolved" && unitPrice == null);
       return matchesQuery
+        && (source === "All sources" || l.source === source)
         && (location === "All locations" || l.normalized_location === location)
         && (status === "All statuses" || l.current_status === status)
+        && matchesBand
         && (!targetOnly || (l.calculated_price_per_m2 ?? Infinity) <= 2300)
-        && (!cleanOnly || l.clean_baseline_eligible);
+        && (!cleanOnly || l.clean_baseline_eligible)
+        && (!issuesOnly || l.ambiguity_flags?.length > 0 || l.possible_duplicate || l.extraction_confidence === "low");
     });
     return result.sort((a, b) => {
       if (sort === "ppsqm-asc") return (a.calculated_price_per_m2 ?? Infinity) - (b.calculated_price_per_m2 ?? Infinity);
@@ -123,7 +158,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       if (sort === "newest") return new Date(b.source_published_at ?? 0).getTime() - new Date(a.source_published_at ?? 0).getTime();
       return (b.total_score ?? 0) - (a.total_score ?? 0);
     });
-  }, [listings, query, location, status, targetOnly, cleanOnly, sort]);
+  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, sort]);
 
   const opportunities = useMemo(() => listings
     .filter((l) => l.clean_baseline_eligible && (l.calculated_price_per_m2 ?? Infinity) <= 2300)
@@ -144,6 +179,35 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     setSelected(listing);
     setStatusDraft(listing.current_status);
     setNotice("");
+  };
+
+  const exportFilteredCsv = () => {
+    const headers = [
+      "Source", "Listing ID", "Title", "Location", "Price EUR", "Area m2", "EUR per m2",
+      "Bedrooms", "Bathrooms", "Floor", "Parking", "Garage", "Sea view", "New construction",
+      "Seller type", "Agency", "Status", "Classification", "Score", "Confidence",
+      "Possible duplicate", "Ambiguity flags", "First seen", "Last seen", "Published", "Public contact", "Listing URL",
+    ];
+    const rows = filtered.map((listing) => [
+      sourceLabel(listing.source), listing.source_listing_id, listing.title, listing.normalized_location,
+      listing.price_value, listing.area_used_for_ppsqm_m2, listing.calculated_price_per_m2,
+      listing.bedrooms, listing.bathrooms, listing.floor, listing.parking ? "Yes" : "No",
+      listing.garage ? "Yes" : "No", listing.sea_view ? "Yes" : "No", listing.new_construction ? "Yes" : "No",
+      listing.seller_type, listing.agency_name, listing.current_status, listing.classification, listing.total_score,
+      listing.extraction_confidence, listing.possible_duplicate ? "Yes" : "No", listing.ambiguity_flags,
+      listing.first_seen_at, listing.last_seen_at, listing.source_published_at, listing.public_contact, listing.canonical_url,
+    ]);
+    const csv = `\uFEFF${[headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `montenegro-property-deals-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setExportNotice(`${filtered.length} filtered listings exported to CSV.`);
+    window.setTimeout(() => setExportNotice(""), 3000);
   };
 
   const copyContact = async (value: string, event?: React.MouseEvent) => {
@@ -198,14 +262,14 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       <main className="main">
         <header className="topbar">
           <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
-          <div className="scan-chip"><span>Last scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
+          <div className="scan-chip"><span>Latest source scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{sourceLabel(data.latest_scan.source)} · {data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
         {data.dataMode === "preview" && <div className="preview-banner"><strong>Design preview</strong> — the deployed private site loads all {trackedCount} live Supabase records.</div>}
 
         {tab === "overview" && <>
           <section className="metric-grid">
-            <article className="metric-card dark"><span>Tracked listings</span><strong>{trackedCount}</strong><small>100% scan success</small><div className="metric-orbit" /></article>
+            <article className="metric-card dark"><span>Tracked listings</span><strong>{trackedCount}</strong><small>{sources.length - 1} approved sources</small><div className="metric-orbit" /></article>
             <article className="metric-card"><span>Clean market median</span><strong>{ppsqm(median(validPrices))}</strong><small>Baseline benchmark</small></article>
             <article className="metric-card"><span>Within target</span><strong>{targetCount}</strong><small>At or below €2,300/m²</small></article>
             <article className="metric-card alert"><span>Verify immediately</span><strong>{suspiciousCount}</strong><small>Below €1,500/m²</small></article>
@@ -236,7 +300,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             <div className="opportunity-grid">
               {opportunities.map((listing, index) => <button className="opportunity-card" key={listing.id} onClick={() => openListing(listing)}>
                 <div className="opportunity-top"><span>0{index + 1}</span><i className={`tone ${toneFor(listing)}`}>{listing.classification}</i></div>
-                <h3>{listing.title}</h3><p>{listing.normalized_location} · {listing.bedrooms ?? "—"} bed · {listing.area_used_for_ppsqm_m2 ?? "—"} m²</p>
+                <h3>{listing.title}</h3><p>{sourceLabel(listing.source)} · {listing.normalized_location} · {listing.bedrooms ?? "—"} bed · {listing.area_used_for_ppsqm_m2 ?? "—"} m²</p>
                 <div className="opportunity-price"><strong>{money(listing.price_value)}</strong><b>{ppsqm(listing.calculated_price_per_m2)}</b></div>
                 <div className="tag-row">{listing.parking && <span>Parking</span>}{listing.sea_view && <span>Sea view</span>}{listing.new_construction && <span>New build</span>}<span>Score {listing.total_score ?? "—"}</span></div>
               </button>)}
@@ -245,38 +309,42 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </>}
 
         {tab === "listings" && <section className="listing-workspace">
-          <div className="workspace-head"><div><span>LIVE INVENTORY</span><h2>{filtered.length} matching listings</h2></div><p>Click any row to inspect the full evidence record.</p></div>
+          <div className="workspace-head"><div><span>LIVE INVENTORY</span><h2>{filtered.length} matching listings</h2></div><div className="workspace-actions"><p>Export respects every active filter.</p><button onClick={exportFilteredCsv}>⇩ Export {filtered.length} CSV</button></div></div>
           <div className="filters">
             <label className="search"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search title, ID, agency…" /></label>
+            <select value={source} onChange={(e) => setSource(e.target.value)}>{sources.map((v) => <option key={v} value={v}>{v === "All sources" ? v : sourceLabel(v)}</option>)}</select>
             <select value={location} onChange={(e) => setLocation(e.target.value)}>{locations.map((v) => <option key={v}>{v}</option>)}</select>
             <select value={status} onChange={(e) => setStatus(e.target.value)}><option>All statuses</option>{ALL_STATUSES.map((v) => <option key={v}>{v}</option>)}</select>
+            <select value={priceBand} onChange={(e) => setPriceBand(e.target.value)}><option>All price bands</option><option>≤ €2,000/m²</option><option>€2,001–2,300/m²</option><option>&gt; €2,300/m²</option><option>Price/area unresolved</option></select>
             <select value={sort} onChange={(e) => setSort(e.target.value)}><option value="ppsqm-asc">Lowest €/m²</option><option value="ppsqm-desc">Highest €/m²</option><option value="score">Best score</option><option value="price-asc">Lowest price</option><option value="newest">Newest</option></select>
             <label className="toggle"><input type="checkbox" checked={targetOnly} onChange={(e) => setTargetOnly(e.target.checked)} /><span />≤ €2,300</label>
             <label className="toggle"><input type="checkbox" checked={cleanOnly} onChange={(e) => setCleanOnly(e.target.checked)} /><span />Clean only</label>
+            <label className="toggle"><input type="checkbox" checked={issuesOnly} onChange={(e) => setIssuesOnly(e.target.checked)} /><span />Issues only</label>
           </div>
-          <div className="table-wrap"><table><thead><tr><th>Property</th><th>Location</th><th>Price</th><th>Area</th><th>€/m²</th><th>Contact</th><th>Signal</th><th>Status</th></tr></thead><tbody>
+          {exportNotice && <div className="export-notice">{exportNotice}</div>}
+          <div className="table-wrap"><table><thead><tr><th>Property</th><th>Source</th><th>Location</th><th>Price</th><th>Area</th><th>€/m²</th><th>Contact</th><th>Signal</th><th>Status</th></tr></thead><tbody>
             {filtered.map((listing) => {
               const contacts = contactParts(listing.public_contact);
               const primaryPhone = contacts.phones[0];
               const primaryEmail = contacts.emails[0];
-              return <tr key={listing.id} onClick={() => openListing(listing)}><td><strong>{listing.title || "Untitled listing"}</strong><small>Realitica #{listing.source_listing_id}{listing.possible_duplicate ? " · possible duplicate" : ""}</small></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><div className="contact-mini">{primaryPhone && <a href={`tel:${phoneHref(primaryPhone)}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${primaryPhone}`} title={`Call ${primaryPhone}`}>☎</a>}{primaryEmail && <a href={`mailto:${primaryEmail}`} onClick={(e) => e.stopPropagation()} aria-label={`Email ${primaryEmail}`} title={`Email ${primaryEmail}`}>✉</a>}{(primaryPhone || primaryEmail) && <button onClick={(e) => copyContact(primaryPhone || primaryEmail, e)} aria-label="Copy contact" title="Copy contact">{copiedContact === (primaryPhone || primaryEmail) ? "✓" : "⎘"}</button>}{!primaryPhone && !primaryEmail && <span>—</span>}</div></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>;
+              return <tr key={listing.id} onClick={() => openListing(listing)}><td><strong>{listing.title || "Untitled listing"}</strong><small>#{listing.source_listing_id}{listing.possible_duplicate ? " · possible duplicate" : ""}{listing.ambiguity_flags?.length ? ` · ${listing.ambiguity_flags.length} issue${listing.ambiguity_flags.length === 1 ? "" : "s"}` : ""}</small></td><td><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><div className="contact-mini">{primaryPhone && <a href={`tel:${phoneHref(primaryPhone)}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${primaryPhone}`} title={`Call ${primaryPhone}`}>☎</a>}{primaryEmail && <a href={`mailto:${primaryEmail}`} onClick={(e) => e.stopPropagation()} aria-label={`Email ${primaryEmail}`} title={`Email ${primaryEmail}`}>✉</a>}{(primaryPhone || primaryEmail) && <button onClick={(e) => copyContact(primaryPhone || primaryEmail, e)} aria-label="Copy contact" title="Copy contact">{copiedContact === (primaryPhone || primaryEmail) ? "✓" : "⎘"}</button>}{!primaryPhone && !primaryEmail && <span>—</span>}</div></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>;
             })}
           </tbody></table>{!filtered.length && <div className="empty">No listings match these filters.</div>}</div>
         </section>}
 
         {tab === "review" && <section className="review-grid">
           <article className="panel review-list"><div className="panel-heading"><div><span>ATTENTION NEEDED</span><h2>{reviewCount} listings in review</h2></div></div>
-            {listings.filter((l) => l.current_status === "Review").slice(0, 12).map((listing) => <button key={listing.id} onClick={() => openListing(listing)}><span className={`review-dot ${listing.extraction_confidence}`} /><div><strong>{listing.title}</strong><small>#{listing.source_listing_id} · {listing.normalized_location}</small></div><b>{ppsqm(listing.calculated_price_per_m2)}</b></button>)}
+            {listings.filter((l) => l.current_status === "Review").slice(0, 12).map((listing) => <button key={listing.id} onClick={() => openListing(listing)}><span className={`review-dot ${listing.extraction_confidence}`} /><div><strong>{listing.title}</strong><small>{sourceLabel(listing.source)} #{listing.source_listing_id} · {listing.normalized_location}</small></div><b>{ppsqm(listing.calculated_price_per_m2)}</b></button>)}
             {reviewCount > 12 && <button className="show-all" onClick={() => { setStatus("Review"); setTab("listings"); }}>Show all {reviewCount} review listings →</button>}
           </article>
-          <article className="panel duplicates"><div className="panel-heading"><div><span>DUPLICATE CANDIDATES</span><h2>{data.duplicates.length} relationships</h2></div></div>
-            {data.duplicates.slice(0, 8).map((d) => <div className="duplicate-row" key={d.id}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>#{d.source_listing_id_a} ↔ #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>{d.review_status}</i></div>)}
+          <article className="panel duplicates"><div className="panel-heading"><div><span>DUPLICATE CANDIDATES</span><h2>{activeDuplicates.length} active relationships</h2></div></div>
+            {activeDuplicates.slice(0, 8).map((d) => <div className="duplicate-row" key={d.id}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>{sourceLabel(d.source_a)} #{d.source_listing_id_a} ↔ {sourceLabel(d.source_b)} #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>{d.review_status}</i></div>)}
           </article>
         </section>}
       </main>
 
       {selected && <div className="drawer-backdrop" onMouseDown={() => setSelected(null)}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="drawer-head"><div><span>REALITICA #{selected.source_listing_id}</span><h2>{selected.title}</h2></div><button aria-label="Close" onClick={() => setSelected(null)}>×</button></div>
+        <div className="drawer-head"><div><span>{sourceLabel(selected.source).toUpperCase()} #{selected.source_listing_id}</span><h2>{selected.title}</h2></div><button aria-label="Close" onClick={() => setSelected(null)}>×</button></div>
         <div className="drawer-price"><div><strong>{money(selected.price_value)}</strong><small>{selected.price_basis === "per_m2" ? "Advertised per m²" : "Asking price"}</small></div><div><strong>{ppsqm(selected.calculated_price_per_m2)}</strong><small>{selected.area_used_for_ppsqm_m2 ?? "—"} m² usable basis</small></div></div>
         <div className="drawer-tags"><span>{selected.normalized_location}</span><span>{selected.bedrooms ?? "—"} bedrooms</span>{selected.parking && <span>Parking</span>}{selected.sea_view && <span>Sea view</span>}{selected.new_construction && <span>New construction</span>}</div>
 
@@ -295,7 +363,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             <small className="contact-source">Public source contact · verify before outreach</small>
           </div>;
         })()}</section>
-        <a className="source-link" href={selected.canonical_url} target="_blank" rel="noreferrer">Open original Realitica listing ↗</a>
+        <a className="source-link" href={selected.canonical_url} target="_blank" rel="noreferrer">Open original {sourceLabel(selected.source)} listing ↗</a>
       </aside></div>}
     </div>
   );

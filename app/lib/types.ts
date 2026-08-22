@@ -14,7 +14,7 @@ export type StatusHistory = {
 };
 
 export type Listing = {
-  id: string; source_listing_id: string; canonical_url: string; title: string | null;
+  id: string; source: string; source_listing_id: string; canonical_url: string; title: string | null;
   source_location_raw: string | null; normalized_location: string | null;
   first_seen_at: string; last_seen_at: string; current_status: Status;
   status_changed_at: string; seller_type: string; seller_name: string | null;
@@ -38,8 +38,8 @@ export type Listing = {
 };
 
 export type DuplicateCandidate = {
-  id: string; listing_id_a: string; source_listing_id_a: string;
-  listing_id_b: string; source_listing_id_b: string; confidence_score: number | null;
+  id: string; listing_id_a: string; source_a: string; source_listing_id_a: string;
+  listing_id_b: string; source_b: string; source_listing_id_b: string; confidence_score: number | null;
   same_phone: boolean | null; same_area: boolean | null; same_location: boolean | null;
   same_bedrooms: boolean | null; same_floor: boolean | null; similar_price: boolean | null;
   description_similarity: number | null; photo_similarity: number | null;
@@ -47,7 +47,7 @@ export type DuplicateCandidate = {
 };
 
 export type Scan = {
-  id?: string; started_at?: string; listings_discovered?: number;
+  id?: string; source?: string; started_at?: string; listings_discovered?: number;
   pages_successful?: number; pages_failed?: number; authenticated?: boolean;
 };
 

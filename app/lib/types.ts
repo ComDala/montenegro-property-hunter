@@ -13,6 +13,32 @@ export type StatusHistory = {
   changed_at: string; old_status: string | null; new_status: string; reason: string | null;
 };
 
+export type ListingWorkflow = {
+  listing_id: string;
+  purchase_price: number | null;
+  transfer_tax_cost: number | null;
+  legal_notary_cost: number | null;
+  agency_fee_cost: number | null;
+  renovation_budget: number | null;
+  furnishing_budget: number | null;
+  other_costs: number | null;
+  expected_monthly_rent: number | null;
+  annual_operating_costs: number | null;
+  contacted_at: string | null;
+  contact_method: string | null;
+  contact_person: string | null;
+  response_summary: string | null;
+  viewing_at: string | null;
+  follow_up_at: string | null;
+  questions_to_ask: string | null;
+  offered_price: number | null;
+  negotiation_notes: string | null;
+  next_action: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type Listing = {
   id: string; source: string; source_listing_id: string; canonical_url: string; title: string | null;
   source_location_raw: string | null; normalized_location: string | null;
@@ -36,6 +62,7 @@ export type Listing = {
   total_score: number | null; classification: string | null; explanation: string | null;
   score_model_version: string | null; is_favorite: boolean; private_notes: string | null;
   annotation_updated_at: string | null;
+  workflow?: ListingWorkflow | null;
   price_history: PriceHistory[]; status_history: StatusHistory[];
 };
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { ChangeEvent, DashboardData, DuplicateReviewStatus, Listing, Status } from "./lib/types";
+import type { ChangeEvent, DashboardData, DuplicateReviewStatus, Listing, ListingWorkflow, Status } from "./lib/types";
 
 const ALL_STATUSES: Status[] = [
   "New", "Review", "Watch", "Hot Deal", "Contact Agent", "Contacted",
@@ -114,6 +114,67 @@ function Icon({ children }: { children: React.ReactNode }) {
   return <span className="icon">{children}</span>;
 }
 
+type WorkflowDraft = {
+  purchase_price: string; transfer_tax_cost: string; legal_notary_cost: string;
+  agency_fee_cost: string; renovation_budget: string; furnishing_budget: string;
+  other_costs: string; expected_monthly_rent: string; annual_operating_costs: string;
+  contacted_at: string; contact_method: string; contact_person: string;
+  response_summary: string; viewing_at: string; follow_up_at: string;
+  questions_to_ask: string; offered_price: string; negotiation_notes: string;
+  next_action: string;
+};
+
+const blankWorkflow: WorkflowDraft = {
+  purchase_price: "", transfer_tax_cost: "", legal_notary_cost: "",
+  agency_fee_cost: "", renovation_budget: "", furnishing_budget: "",
+  other_costs: "", expected_monthly_rent: "", annual_operating_costs: "",
+  contacted_at: "", contact_method: "", contact_person: "", response_summary: "",
+  viewing_at: "", follow_up_at: "", questions_to_ask: "", offered_price: "",
+  negotiation_notes: "", next_action: "",
+};
+
+function fieldValue(value?: number | null) {
+  return value == null ? "" : String(value);
+}
+
+function localDateTime(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function workflowDraft(workflow: ListingWorkflow | null | undefined, askingPrice: number | null): WorkflowDraft {
+  return {
+    purchase_price: fieldValue(workflow?.purchase_price ?? askingPrice),
+    transfer_tax_cost: fieldValue(workflow?.transfer_tax_cost),
+    legal_notary_cost: fieldValue(workflow?.legal_notary_cost),
+    agency_fee_cost: fieldValue(workflow?.agency_fee_cost),
+    renovation_budget: fieldValue(workflow?.renovation_budget),
+    furnishing_budget: fieldValue(workflow?.furnishing_budget),
+    other_costs: fieldValue(workflow?.other_costs),
+    expected_monthly_rent: fieldValue(workflow?.expected_monthly_rent),
+    annual_operating_costs: fieldValue(workflow?.annual_operating_costs),
+    contacted_at: localDateTime(workflow?.contacted_at),
+    contact_method: workflow?.contact_method ?? "",
+    contact_person: workflow?.contact_person ?? "",
+    response_summary: workflow?.response_summary ?? "",
+    viewing_at: localDateTime(workflow?.viewing_at),
+    follow_up_at: localDateTime(workflow?.follow_up_at),
+    questions_to_ask: workflow?.questions_to_ask ?? "",
+    offered_price: fieldValue(workflow?.offered_price),
+    negotiation_notes: workflow?.negotiation_notes ?? "",
+    next_action: workflow?.next_action ?? "",
+  };
+}
+
+function draftNumber(value: string) {
+  if (!value.trim()) return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
 export default function Dashboard({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
   const [tab, setTab] = useState<"overview" | "deals" | "changes" | "listings" | "review">("overview");
@@ -140,8 +201,11 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [statusDraft, setStatusDraft] = useState<Status>("New");
   const [favoriteDraft, setFavoriteDraft] = useState(false);
   const [notesDraft, setNotesDraft] = useState("");
+  const [workflow, setWorkflow] = useState<WorkflowDraft>(blankWorkflow);
   const [saving, setSaving] = useState(false);
   const [savingAnnotation, setSavingAnnotation] = useState(false);
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
+  const [workflowNotice, setWorkflowNotice] = useState("");
   const [notice, setNotice] = useState("");
   const [exportNotice, setExportNotice] = useState("");
   const [copiedContact, setCopiedContact] = useState("");
@@ -239,7 +303,9 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     setStatusDraft(listing.current_status);
     setFavoriteDraft(listing.is_favorite);
     setNotesDraft(listing.private_notes ?? "");
+    setWorkflow(workflowDraft(listing.workflow, listing.price_value));
     setNotice("");
+    setWorkflowNotice("");
   };
 
   const exportListingsCsv = (exportListings: Listing[], filename: string, message: string) => {
@@ -248,6 +314,9 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       "Bedrooms", "Bathrooms", "Floor", "Parking", "Garage", "Sea view", "New construction",
       "Seller type", "Agency", "Status", "Classification", "Score", "Confidence",
       "Favorite", "Private notes", "Possible duplicate", "Ambiguity flags", "First seen", "Last seen", "Published", "Public contact", "Listing URL",
+      "Model purchase price", "Transfer tax", "Legal and notary", "Agency fee", "Renovation", "Furnishing", "Other costs",
+      "Expected monthly rent", "Annual operating costs", "Contacted at", "Contact method", "Contact person", "Response",
+      "Viewing at", "Follow up at", "Questions", "Offered price", "Negotiation notes", "Next action", "Deal plan updated",
     ];
     const rows = exportListings.map((listing) => [
       sourceLabel(listing.source), listing.source_listing_id, listing.title, listing.normalized_location,
@@ -258,6 +327,13 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       listing.extraction_confidence, listing.is_favorite ? "Yes" : "No", listing.private_notes,
       listing.possible_duplicate ? "Yes" : "No", listing.ambiguity_flags,
       listing.first_seen_at, listing.last_seen_at, listing.source_published_at, listing.public_contact, listing.canonical_url,
+      listing.workflow?.purchase_price, listing.workflow?.transfer_tax_cost, listing.workflow?.legal_notary_cost,
+      listing.workflow?.agency_fee_cost, listing.workflow?.renovation_budget, listing.workflow?.furnishing_budget,
+      listing.workflow?.other_costs, listing.workflow?.expected_monthly_rent, listing.workflow?.annual_operating_costs,
+      listing.workflow?.contacted_at, listing.workflow?.contact_method, listing.workflow?.contact_person,
+      listing.workflow?.response_summary, listing.workflow?.viewing_at, listing.workflow?.follow_up_at,
+      listing.workflow?.questions_to_ask, listing.workflow?.offered_price, listing.workflow?.negotiation_notes,
+      listing.workflow?.next_action, listing.workflow?.updated_at,
     ]);
     const csv = `\uFEFF${[headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -355,6 +431,48 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     }
   };
 
+  const setWorkflowField = (field: keyof WorkflowDraft, value: string) => {
+    setWorkflow((current) => ({ ...current, [field]: value }));
+    setWorkflowNotice("");
+  };
+
+  const saveWorkflow = async (successMessage: string) => {
+    if (!selected) return;
+    setSavingWorkflow(true);
+    setWorkflowNotice("");
+    const numericFields: (keyof WorkflowDraft)[] = [
+      "purchase_price", "transfer_tax_cost", "legal_notary_cost", "agency_fee_cost",
+      "renovation_budget", "furnishing_budget", "other_costs", "expected_monthly_rent",
+      "annual_operating_costs", "offered_price",
+    ];
+    const payload: Record<string, string | number | null> = { ...workflow };
+    numericFields.forEach((field) => {
+      payload[field] = workflow[field].trim() ? Number(workflow[field]) : null;
+    });
+    (["contacted_at", "viewing_at", "follow_up_at"] as (keyof WorkflowDraft)[]).forEach((field) => {
+      payload[field] = workflow[field] ? new Date(workflow[field]).toISOString() : null;
+    });
+
+    try {
+      const response = await fetch("/api/workflow", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ listing_id: selected.id, workflow: payload }),
+      });
+      if (!response.ok) throw new Error();
+      const saved = await response.json() as ListingWorkflow;
+      const updated = { ...selected, workflow: saved };
+      setData((current) => ({ ...current, listings: current.listings.map((listing) => listing.id === updated.id ? updated : listing) }));
+      setSelected(updated);
+      setWorkflow(workflowDraft(saved, selected.price_value));
+      setWorkflowNotice(successMessage);
+    } catch {
+      setWorkflowNotice("The deal plan could not be saved. Please check the values and try again.");
+    } finally {
+      setSavingWorkflow(false);
+    }
+  };
+
   const openDuplicateComparison = (candidateId: string) => {
     const candidate = data.duplicates.find((item) => item.id === candidateId);
     if (!candidate) return;
@@ -403,6 +521,20 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const selectedComparison = comparisonId ? activeDuplicates.find((candidate) => candidate.id === comparisonId) : null;
   const comparisonA = selectedComparison ? listingById.get(selectedComparison.listing_id_a) : null;
   const comparisonB = selectedComparison ? listingById.get(selectedComparison.listing_id_b) : null;
+  const modelPurchasePrice = draftNumber(workflow.purchase_price);
+  const modelUpfrontCosts = [
+    workflow.transfer_tax_cost, workflow.legal_notary_cost, workflow.agency_fee_cost,
+    workflow.renovation_budget, workflow.furnishing_budget, workflow.other_costs,
+  ].reduce((sum, value) => sum + draftNumber(value), 0);
+  const modelTotalAcquisition = modelPurchasePrice + modelUpfrontCosts;
+  const modelAnnualRent = draftNumber(workflow.expected_monthly_rent) * 12;
+  const modelNetAnnualIncome = modelAnnualRent - draftNumber(workflow.annual_operating_costs);
+  const modelGrossYield = modelTotalAcquisition > 0 ? modelAnnualRent / modelTotalAcquisition * 100 : null;
+  const modelNetYield = modelTotalAcquisition > 0 ? modelNetAnnualIncome / modelTotalAcquisition * 100 : null;
+  const modelAllInPpsqm = modelTotalAcquisition > 0 && selected?.area_used_for_ppsqm_m2
+    ? modelTotalAcquisition / selected.area_used_for_ppsqm_m2 : null;
+  const modelDiscount = selected?.price_value && modelPurchasePrice > 0
+    ? (modelPurchasePrice - selected.price_value) / selected.price_value * 100 : null;
 
   return (
     <div className="app-shell">
@@ -492,7 +624,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
                 <button className="deal-title" onClick={() => openListing(listing)}><strong>{listing.title || `Listing #${listing.source_listing_id}`}</strong><small>#{listing.source_listing_id} · {listing.normalized_location || "Unresolved location"}</small></button>
                 <div className="deal-values"><div><small>ASKING</small><strong>{money(listing.price_value)}</strong></div><div><small>VALUE</small><strong>{ppsqm(listing.calculated_price_per_m2)}</strong></div><div><small>VS. AREA MEDIAN</small><strong className={delta != null && delta < 0 ? "positive" : ""}>{delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)}%`}</strong></div></div>
                 <div className="deal-signals"><span>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "Area unresolved"}</span><span>{listing.bedrooms ?? "—"} bed</span>{listing.parking && <span>Parking</span>}{listing.sea_view && <span>Sea view</span>}</div>
-                <div className="deal-meta"><span className="status-pill">{listing.current_status}</span><span>Score {listing.total_score ?? "—"}</span><span>{listing.price_history.length > 1 ? `${listing.price_history.length} price events` : "Price baseline"}</span></div>
+                <div className="deal-meta"><span className="status-pill">{listing.current_status}</span><span>Score {listing.total_score ?? "—"}</span><span>{listing.price_history.length > 1 ? `${listing.price_history.length} price events` : "Price baseline"}</span>{listing.workflow && <span className="plan-saved">Deal plan saved</span>}</div>
                 {cheaperOffer && <button className="competing-alert" onClick={() => openListing(cheaperOffer)}><strong>Cheaper competing offer</strong><span>{sourceLabel(cheaperOffer.source)} · {money(cheaperOffer.price_value)} →</span></button>}
                 {!cheaperOffer && offers.length > 0 && <div className="competing-note">{offers.length} linked competing offer{offers.length === 1 ? "" : "s"}</div>}
                 <button className="inspect-deal" onClick={() => openListing(listing)}>Inspect deal →</button>
@@ -511,6 +643,9 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
               <tr><td>Features</td>{comparedDeals.map((listing) => <td key={listing.id}>{[listing.parking && "Parking", listing.garage && "Garage", listing.sea_view && "Sea view", listing.new_construction && "New build"].filter(Boolean).join(" · ") || "—"}</td>)}</tr>
               <tr><td>Agency / seller</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.agency_name ?? listing.seller_type}</td>)}</tr>
               <tr><td>Status</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.current_status}</td>)}</tr>
+              <tr><td>Planned purchase</td>{comparedDeals.map((listing) => <td key={listing.id}>{money(listing.workflow?.purchase_price ?? null)}</td>)}</tr>
+              <tr><td>Expected rent</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.workflow?.expected_monthly_rent ? `${money(listing.workflow.expected_monthly_rent)} / month` : "—"}</td>)}</tr>
+              <tr><td>Next action</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.workflow?.next_action || "—"}</td>)}</tr>
               <tr><td>Private note</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.private_notes || "—"}</td>)}</tr>
             </tbody></table></div>
           </section>}
@@ -583,6 +718,39 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         {selected.ambiguity_flags?.length > 0 && <div className="warning-box"><strong>Verification needed</strong>{selected.ambiguity_flags.map((flag) => <p key={flag}>• {flag}</p>)}</div>}
 
         <section className="drawer-section"><span>MY SHORTLIST</span><label className="notes-field"><small>Private notes</small><textarea value={notesDraft} maxLength={5000} onChange={(event) => setNotesDraft(event.target.value)} placeholder="Why it stands out, questions for the agent, viewing notes…" /></label><div className="annotation-actions"><label><input type="checkbox" checked={favoriteDraft} onChange={(event) => setFavoriteDraft(event.target.checked)} /> Favorite deal</label><button disabled={savingAnnotation || data.dataMode !== "live" || (favoriteDraft === selected.is_favorite && notesDraft.trim() === (selected.private_notes ?? ""))} onClick={saveAnnotation}>{savingAnnotation ? "Saving…" : "Save shortlist"}</button></div></section>
+
+        <section className="drawer-section planner-section"><span>INVESTMENT CALCULATOR</span><p className="section-intro">Test your own purchase and rental assumptions. These figures never replace the source asking price.</p>
+          <div className="calculator-results"><div><small>Total acquisition</small><strong>{money(modelTotalAcquisition || null)}</strong></div><div><small>All-in €/m²</small><strong>{ppsqm(modelAllInPpsqm)}</strong></div><div><small>Gross yield</small><strong>{modelGrossYield == null ? "—" : `${modelGrossYield.toFixed(2)}%`}</strong></div><div><small>Net yield</small><strong>{modelNetYield == null ? "—" : `${modelNetYield.toFixed(2)}%`}</strong></div></div>
+          <div className="model-signal"><span>Purchase vs asking</span><strong className={modelDiscount != null && modelDiscount < 0 ? "positive" : ""}>{modelDiscount == null ? "—" : `${modelDiscount > 0 ? "+" : ""}${modelDiscount.toFixed(1)}%`}</strong><small>Annual rent {money(modelAnnualRent || null)} · net income {money(modelNetAnnualIncome || null)}</small></div>
+          <div className="workflow-fields investment-fields">
+            <label><small>Purchase price</small><input type="number" min="0" step="100" value={workflow.purchase_price} onChange={(event) => setWorkflowField("purchase_price", event.target.value)} /></label>
+            <label><small>Transfer tax</small><input type="number" min="0" step="100" value={workflow.transfer_tax_cost} onChange={(event) => setWorkflowField("transfer_tax_cost", event.target.value)} placeholder="0" /></label>
+            <label><small>Legal & notary</small><input type="number" min="0" step="100" value={workflow.legal_notary_cost} onChange={(event) => setWorkflowField("legal_notary_cost", event.target.value)} placeholder="0" /></label>
+            <label><small>Agency fee</small><input type="number" min="0" step="100" value={workflow.agency_fee_cost} onChange={(event) => setWorkflowField("agency_fee_cost", event.target.value)} placeholder="0" /></label>
+            <label><small>Renovation</small><input type="number" min="0" step="100" value={workflow.renovation_budget} onChange={(event) => setWorkflowField("renovation_budget", event.target.value)} placeholder="0" /></label>
+            <label><small>Furnishing</small><input type="number" min="0" step="100" value={workflow.furnishing_budget} onChange={(event) => setWorkflowField("furnishing_budget", event.target.value)} placeholder="0" /></label>
+            <label><small>Other costs</small><input type="number" min="0" step="100" value={workflow.other_costs} onChange={(event) => setWorkflowField("other_costs", event.target.value)} placeholder="0" /></label>
+            <label><small>Expected monthly rent</small><input type="number" min="0" step="25" value={workflow.expected_monthly_rent} onChange={(event) => setWorkflowField("expected_monthly_rent", event.target.value)} placeholder="0" /></label>
+            <label><small>Annual operating costs</small><input type="number" min="0" step="100" value={workflow.annual_operating_costs} onChange={(event) => setWorkflowField("annual_operating_costs", event.target.value)} placeholder="0" /></label>
+          </div>
+          <div className="workflow-save"><span>{workflowNotice}</span><button disabled={savingWorkflow || data.dataMode !== "live"} onClick={() => saveWorkflow("Investment model saved with an audit snapshot.")}>{savingWorkflow ? "Saving…" : "Save investment model"}</button></div>
+        </section>
+
+        <section className="drawer-section planner-section"><span>CONTACT & VIEWING WORKFLOW</span><p className="section-intro">Keep outreach, viewings and negotiation details attached to this exact source listing.</p>
+          <div className="workflow-fields">
+            <label><small>Contacted</small><input type="datetime-local" value={workflow.contacted_at} onChange={(event) => setWorkflowField("contacted_at", event.target.value)} /></label>
+            <label><small>Method</small><select value={workflow.contact_method} onChange={(event) => setWorkflowField("contact_method", event.target.value)}><option value="">Not selected</option><option>Phone</option><option>WhatsApp</option><option>Email</option><option>In person</option><option>Other</option></select></label>
+            <label className="wide"><small>Agent or owner</small><input value={workflow.contact_person} maxLength={320} onChange={(event) => setWorkflowField("contact_person", event.target.value)} placeholder={selected.agency_name ?? "Name of contact"} /></label>
+            <label className="wide"><small>Response</small><textarea value={workflow.response_summary} maxLength={5000} onChange={(event) => setWorkflowField("response_summary", event.target.value)} placeholder="Availability, documents, flexibility, answers…" /></label>
+            <label><small>Viewing date</small><input type="datetime-local" value={workflow.viewing_at} onChange={(event) => setWorkflowField("viewing_at", event.target.value)} /></label>
+            <label><small>Follow-up</small><input type="datetime-local" value={workflow.follow_up_at} onChange={(event) => setWorkflowField("follow_up_at", event.target.value)} /></label>
+            <label className="wide"><small>Questions to ask</small><textarea value={workflow.questions_to_ask} maxLength={5000} onChange={(event) => setWorkflowField("questions_to_ask", event.target.value)} placeholder="Ownership documents, exact internal area, maintenance, utilities…" /></label>
+            <label><small>Offered price</small><input type="number" min="0" step="100" value={workflow.offered_price} onChange={(event) => setWorkflowField("offered_price", event.target.value)} placeholder="€" /></label>
+            <label className="wide"><small>Next action</small><input value={workflow.next_action} maxLength={1000} onChange={(event) => setWorkflowField("next_action", event.target.value)} placeholder="Call again, request documents, schedule viewing…" /></label>
+            <label className="wide"><small>Negotiation notes</small><textarea value={workflow.negotiation_notes} maxLength={5000} onChange={(event) => setWorkflowField("negotiation_notes", event.target.value)} placeholder="Seller position, counteroffers, conditions and leverage…" /></label>
+          </div>
+          <div className="workflow-save"><span>{workflowNotice}{selected.workflow?.updated_at ? ` Last saved ${shortDate(selected.workflow.updated_at)}.` : ""}</span><button disabled={savingWorkflow || data.dataMode !== "live"} onClick={() => saveWorkflow("Contact and viewing plan saved with an audit snapshot.")}>{savingWorkflow ? "Saving…" : "Save contact plan"}</button></div>
+        </section>
         <section className="drawer-section"><span>ACQUISITION STATUS</span><div className="status-editor"><select value={statusDraft} onChange={(e) => setStatusDraft(e.target.value as Status)}>{ALL_STATUSES.map((v) => <option key={v}>{v}</option>)}</select><button disabled={saving || statusDraft === selected.current_status || data.dataMode !== "live"} onClick={saveStatus}>{saving ? "Saving…" : "Save status"}</button></div>{notice && <p className="notice">{notice}</p>}</section>
         <section className="drawer-section"><span>PROPERTY EVIDENCE</span><dl><div><dt>Floor</dt><dd>{selected.floor ?? "—"}{selected.total_floors ? ` / ${selected.total_floors}` : ""}</dd></div><div><dt>Condition</dt><dd>{selected.building_condition ?? "—"}</dd></div><div><dt>Seller</dt><dd>{selected.seller_type}{selected.agency_name ? ` · ${selected.agency_name}` : ""}</dd></div><div><dt>Published</dt><dd>{shortDate(selected.source_published_at)}</dd></div><div><dt>Modified</dt><dd>{shortDate(selected.source_modified_at)}</dd></div><div><dt>Confidence</dt><dd>{selected.extraction_confidence}</dd></div><div><dt>{selected.score_model_version ?? "V2"} score</dt><dd>{selected.total_score ?? "—"} · {selected.classification}</dd></div></dl>{selected.explanation && <p className="score-explanation">{selected.explanation}</p>}</section>
         <section className="drawer-section"><span>DESCRIPTION</span><p className="description">{selected.description_raw || "No description captured."}</p></section>

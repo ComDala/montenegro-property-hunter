@@ -34,7 +34,17 @@ export type Listing = {
   description_raw: string | null; ambiguity_flags: string[];
   extraction_confidence: "high" | "medium" | "low" | "unknown";
   total_score: number | null; classification: string | null; explanation: string | null;
+  score_model_version: string | null; is_favorite: boolean; private_notes: string | null;
+  annotation_updated_at: string | null;
   price_history: PriceHistory[]; status_history: StatusHistory[];
+};
+
+export type ChangeEvent = {
+  listing_id: string; source: string; source_listing_id: string; title: string | null;
+  normalized_location: string | null; observed_at: string;
+  event_type: "new" | "price_reduced" | "price_increased" | "modified" | "removed";
+  previous_price: number | null; current_price: number | null;
+  change_amount: number | null; change_percent: number | null; changed_fields: string[];
 };
 
 export type DuplicateCandidate = {
@@ -53,5 +63,6 @@ export type Scan = {
 
 export type DashboardData = {
   generated_at: string; latest_scan: Scan; listings: Listing[];
-  duplicates: DuplicateCandidate[]; dataMode?: "live" | "preview";
+  scan_history: Scan[]; changes: ChangeEvent[]; duplicates: DuplicateCandidate[];
+  dataMode?: "live" | "preview";
 };

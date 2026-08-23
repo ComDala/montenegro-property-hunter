@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { DashboardData, Listing, Status } from "./lib/types";
+import type { ChangeEvent, DashboardData, Listing, Status } from "./lib/types";
 
 const ALL_STATUSES: Status[] = [
   "New", "Review", "Watch", "Hot Deal", "Contact Agent", "Contacted",
@@ -33,6 +33,21 @@ const SOURCE_LABELS: Record<string, string> = {
 function sourceLabel(value?: string | null) {
   if (!value) return "Unknown source";
   return SOURCE_LABELS[value] ?? value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+const CHANGE_LABELS: Record<ChangeEvent["event_type"], string> = {
+  new: "New listing",
+  price_reduced: "Price reduced",
+  price_increased: "Price increased",
+  modified: "Listing updated",
+  removed: "Removed",
+};
+
+function changeTone(type: ChangeEvent["event_type"]) {
+  if (type === "price_reduced") return "good";
+  if (type === "price_increased" || type === "removed") return "danger";
+  if (type === "new") return "fresh";
+  return "neutral";
 }
 
 function csvCell(value: unknown) {
@@ -101,7 +116,7 @@ function Icon({ children }: { children: React.ReactNode }) {
 
 export default function Dashboard({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [tab, setTab] = useState<"overview" | "listings" | "review">("overview");
+  const [tab, setTab] = useState<"overview" | "changes" | "listings" | "review">("overview");
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("All sources");
   const [location, setLocation] = useState("All locations");
@@ -110,10 +125,17 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [targetOnly, setTargetOnly] = useState(false);
   const [cleanOnly, setCleanOnly] = useState(false);
   const [issuesOnly, setIssuesOnly] = useState(false);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sort, setSort] = useState("ppsqm-asc");
+  const [changeType, setChangeType] = useState("All changes");
+  const [changeDays, setChangeDays] = useState(7);
   const [selected, setSelected] = useState<Listing | null>(null);
+  const [comparisonId, setComparisonId] = useState<string | null>(null);
   const [statusDraft, setStatusDraft] = useState<Status>("New");
+  const [favoriteDraft, setFavoriteDraft] = useState(false);
+  const [notesDraft, setNotesDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savingAnnotation, setSavingAnnotation] = useState(false);
   const [notice, setNotice] = useState("");
   const [exportNotice, setExportNotice] = useState("");
   const [copiedContact, setCopiedContact] = useState("");
@@ -125,12 +147,20 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     .filter((v): v is number => v != null);
   const trackedCount = listings.length;
   const reviewCount = listings.filter((l) => l.current_status === "Review").length;
+  const favoriteCount = listings.filter((l) => l.is_favorite).length;
   const targetCount = listings.filter((l) => (l.calculated_price_per_m2 ?? Infinity) <= 2300).length;
   const suspiciousCount = listings.filter((l) => (l.calculated_price_per_m2 ?? Infinity) < 1500).length;
 
   const sources = useMemo(() => ["All sources", ...Array.from(new Set(listings.map((l) => l.source).filter(Boolean))).sort()], [listings]);
   const locations = useMemo(() => ["All locations", ...Array.from(new Set(listings.map((l) => l.normalized_location).filter(Boolean) as string[])).sort()], [listings]);
   const activeDuplicates = useMemo(() => data.duplicates.filter((d) => d.review_status !== "Not Duplicate"), [data.duplicates]);
+  const listingById = useMemo(() => new Map(listings.map((listing) => [listing.id, listing])), [listings]);
+
+  const changesInWindow = useMemo(() => {
+    const cutoff = new Date(data.generated_at).getTime() - changeDays * 86_400_000;
+    return (data.changes ?? []).filter((event) => new Date(event.observed_at).getTime() >= cutoff);
+  }, [data.changes, data.generated_at, changeDays]);
+  const recentChanges = useMemo(() => changesInWindow.filter((event) => changeType === "All changes" || event.event_type === changeType), [changesInWindow, changeType]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -149,7 +179,8 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         && matchesBand
         && (!targetOnly || (l.calculated_price_per_m2 ?? Infinity) <= 2300)
         && (!cleanOnly || l.clean_baseline_eligible)
-        && (!issuesOnly || l.ambiguity_flags?.length > 0 || l.possible_duplicate || l.extraction_confidence === "low");
+        && (!issuesOnly || l.ambiguity_flags?.length > 0 || l.possible_duplicate || l.extraction_confidence === "low")
+        && (!favoritesOnly || l.is_favorite);
     });
     return result.sort((a, b) => {
       if (sort === "ppsqm-asc") return (a.calculated_price_per_m2 ?? Infinity) - (b.calculated_price_per_m2 ?? Infinity);
@@ -158,7 +189,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       if (sort === "newest") return new Date(b.source_published_at ?? 0).getTime() - new Date(a.source_published_at ?? 0).getTime();
       return (b.total_score ?? 0) - (a.total_score ?? 0);
     });
-  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, sort]);
+  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, favoritesOnly, sort]);
 
   const opportunities = useMemo(() => listings
     .filter((l) => l.clean_baseline_eligible && (l.calculated_price_per_m2 ?? Infinity) <= 2300)
@@ -178,6 +209,8 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const openListing = (listing: Listing) => {
     setSelected(listing);
     setStatusDraft(listing.current_status);
+    setFavoriteDraft(listing.is_favorite);
+    setNotesDraft(listing.private_notes ?? "");
     setNotice("");
   };
 
@@ -186,7 +219,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       "Source", "Listing ID", "Title", "Location", "Price EUR", "Area m2", "EUR per m2",
       "Bedrooms", "Bathrooms", "Floor", "Parking", "Garage", "Sea view", "New construction",
       "Seller type", "Agency", "Status", "Classification", "Score", "Confidence",
-      "Possible duplicate", "Ambiguity flags", "First seen", "Last seen", "Published", "Public contact", "Listing URL",
+      "Favorite", "Private notes", "Possible duplicate", "Ambiguity flags", "First seen", "Last seen", "Published", "Public contact", "Listing URL",
     ];
     const rows = filtered.map((listing) => [
       sourceLabel(listing.source), listing.source_listing_id, listing.title, listing.normalized_location,
@@ -194,7 +227,8 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       listing.bedrooms, listing.bathrooms, listing.floor, listing.parking ? "Yes" : "No",
       listing.garage ? "Yes" : "No", listing.sea_view ? "Yes" : "No", listing.new_construction ? "Yes" : "No",
       listing.seller_type, listing.agency_name, listing.current_status, listing.classification, listing.total_score,
-      listing.extraction_confidence, listing.possible_duplicate ? "Yes" : "No", listing.ambiguity_flags,
+      listing.extraction_confidence, listing.is_favorite ? "Yes" : "No", listing.private_notes,
+      listing.possible_duplicate ? "Yes" : "No", listing.ambiguity_flags,
       listing.first_seen_at, listing.last_seen_at, listing.source_published_at, listing.public_contact, listing.canonical_url,
     ]);
     const csv = `\uFEFF${[headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
@@ -240,6 +274,36 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     } finally { setSaving(false); }
   };
 
+  const saveAnnotation = async () => {
+    if (!selected) return;
+    setSavingAnnotation(true); setNotice("");
+    try {
+      const response = await fetch("/api/annotation", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ listing_id: selected.id, is_favorite: favoriteDraft, private_notes: notesDraft }),
+      });
+      if (!response.ok) throw new Error();
+      const updated = {
+        ...selected,
+        is_favorite: favoriteDraft,
+        private_notes: notesDraft.trim() || null,
+        annotation_updated_at: new Date().toISOString(),
+      };
+      setData((current) => ({ ...current, listings: current.listings.map((l) => l.id === updated.id ? updated : l) }));
+      setSelected(updated);
+      setNotice("Favorite and private notes saved.");
+    } catch {
+      setNotice("Favorite or notes could not be saved. Please try again.");
+    } finally {
+      setSavingAnnotation(false);
+    }
+  };
+
+  const selectedComparison = comparisonId ? activeDuplicates.find((candidate) => candidate.id === comparisonId) : null;
+  const comparisonA = selectedComparison ? listingById.get(selectedComparison.listing_id_a) : null;
+  const comparisonB = selectedComparison ? listingById.get(selectedComparison.listing_id_b) : null;
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -249,6 +313,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </div>
         <nav>
           <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><Icon>⌁</Icon><span>Market overview</span></button>
+          <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}><Icon>↕</Icon><span>What changed</span><em>{changesInWindow.length}</em></button>
           <button className={tab === "listings" ? "active" : ""} onClick={() => setTab("listings")}><Icon>⌂</Icon><span>Listings</span><em>{trackedCount}</em></button>
           <button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}><Icon>◎</Icon><span>Review queue</span><em>{reviewCount}</em></button>
         </nav>
@@ -261,7 +326,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
       <main className="main">
         <header className="topbar">
-          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
+          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
           <div className="scan-chip"><span>Latest source scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{sourceLabel(data.latest_scan.source)} · {data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
@@ -308,6 +373,28 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           </section>
         </>}
 
+        {tab === "changes" && <section className="change-workspace">
+          <div className="workspace-head"><div><span>HISTORICAL TRACKING</span><h2>{recentChanges.length} recorded events</h2></div><p>Built from append-only observations—older values remain preserved.</p></div>
+          <div className="change-summary">
+            {(["new", "price_reduced", "price_increased", "modified", "removed"] as ChangeEvent["event_type"][]).map((type) => <button key={type} className={changeType === type ? "active" : ""} onClick={() => setChangeType(changeType === type ? "All changes" : type)}><span className={`change-icon ${changeTone(type)}`}>{type === "new" ? "+" : type === "price_reduced" ? "↓" : type === "price_increased" ? "↑" : type === "removed" ? "×" : "~"}</span><strong>{changesInWindow.filter((event) => event.event_type === type).length}</strong><small>{CHANGE_LABELS[type]}</small></button>)}
+          </div>
+          <div className="change-controls">
+            <select value={changeDays} onChange={(event) => setChangeDays(Number(event.target.value))}><option value={1}>Last 24 hours</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option></select>
+            <select value={changeType} onChange={(event) => setChangeType(event.target.value)}><option>All changes</option><option value="new">New listings</option><option value="price_reduced">Price reductions</option><option value="price_increased">Price increases</option><option value="modified">Other updates</option><option value="removed">Removed</option></select>
+          </div>
+          <div className="change-list">
+            {recentChanges.map((event, index) => {
+              const listing = listingById.get(event.listing_id);
+              return <button key={`${event.listing_id}-${event.observed_at}-${index}`} disabled={!listing} onClick={() => listing && openListing(listing)}>
+                <span className={`change-icon ${changeTone(event.event_type)}`}>{event.event_type === "new" ? "+" : event.event_type === "price_reduced" ? "↓" : event.event_type === "price_increased" ? "↑" : event.event_type === "removed" ? "×" : "~"}</span>
+                <div><strong>{event.title || `Listing #${event.source_listing_id}`}</strong><small>{sourceLabel(event.source)} #{event.source_listing_id} · {event.normalized_location || "Unresolved location"} · {shortDate(event.observed_at)}</small><i>{CHANGE_LABELS[event.event_type]}{event.changed_fields?.length ? ` · ${event.changed_fields.join(", ")}` : ""}</i></div>
+                <div className="change-price">{event.event_type === "price_reduced" || event.event_type === "price_increased" ? <><small>{money(event.previous_price)} →</small><strong>{money(event.current_price)}</strong><em className={changeTone(event.event_type)}>{event.change_percent == null ? "" : `${event.change_percent > 0 ? "+" : ""}${event.change_percent.toFixed(1)}%`}</em></> : <strong>{money(event.current_price ?? event.previous_price)}</strong>}</div>
+              </button>;
+            })}
+            {!recentChanges.length && <div className="empty">No recorded changes match this period and filter.</div>}
+          </div>
+        </section>}
+
         {tab === "listings" && <section className="listing-workspace">
           <div className="workspace-head"><div><span>LIVE INVENTORY</span><h2>{filtered.length} matching listings</h2></div><div className="workspace-actions"><p>Export respects every active filter.</p><button onClick={exportFilteredCsv}>⇩ Export {filtered.length} CSV</button></div></div>
           <div className="filters">
@@ -320,6 +407,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             <label className="toggle"><input type="checkbox" checked={targetOnly} onChange={(e) => setTargetOnly(e.target.checked)} /><span />≤ €2,300</label>
             <label className="toggle"><input type="checkbox" checked={cleanOnly} onChange={(e) => setCleanOnly(e.target.checked)} /><span />Clean only</label>
             <label className="toggle"><input type="checkbox" checked={issuesOnly} onChange={(e) => setIssuesOnly(e.target.checked)} /><span />Issues only</label>
+            <label className="toggle"><input type="checkbox" checked={favoritesOnly} onChange={(e) => setFavoritesOnly(e.target.checked)} /><span />Favorites ({favoriteCount})</label>
           </div>
           {exportNotice && <div className="export-notice">{exportNotice}</div>}
           <div className="table-wrap"><table><thead><tr><th>Property</th><th>Source</th><th>Location</th><th>Price</th><th>Area</th><th>€/m²</th><th>Contact</th><th>Signal</th><th>Status</th></tr></thead><tbody>
@@ -327,7 +415,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
               const contacts = contactParts(listing.public_contact);
               const primaryPhone = contacts.phones[0];
               const primaryEmail = contacts.emails[0];
-              return <tr key={listing.id} onClick={() => openListing(listing)}><td><strong>{listing.title || "Untitled listing"}</strong><small>#{listing.source_listing_id}{listing.possible_duplicate ? " · possible duplicate" : ""}{listing.ambiguity_flags?.length ? ` · ${listing.ambiguity_flags.length} issue${listing.ambiguity_flags.length === 1 ? "" : "s"}` : ""}</small></td><td><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><div className="contact-mini">{primaryPhone && <a href={`tel:${phoneHref(primaryPhone)}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${primaryPhone}`} title={`Call ${primaryPhone}`}>☎</a>}{primaryEmail && <a href={`mailto:${primaryEmail}`} onClick={(e) => e.stopPropagation()} aria-label={`Email ${primaryEmail}`} title={`Email ${primaryEmail}`}>✉</a>}{(primaryPhone || primaryEmail) && <button onClick={(e) => copyContact(primaryPhone || primaryEmail, e)} aria-label="Copy contact" title="Copy contact">{copiedContact === (primaryPhone || primaryEmail) ? "✓" : "⎘"}</button>}{!primaryPhone && !primaryEmail && <span>—</span>}</div></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>;
+              return <tr key={listing.id} onClick={() => openListing(listing)}><td><strong>{listing.is_favorite && <span className="favorite-marker">★</span>}{listing.title || "Untitled listing"}</strong><small>#{listing.source_listing_id}{listing.possible_duplicate ? " · possible duplicate" : ""}{listing.ambiguity_flags?.length ? ` · ${listing.ambiguity_flags.length} issue${listing.ambiguity_flags.length === 1 ? "" : "s"}` : ""}{listing.private_notes ? " · private note" : ""}</small></td><td><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><div className="contact-mini">{primaryPhone && <a href={`tel:${phoneHref(primaryPhone)}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${primaryPhone}`} title={`Call ${primaryPhone}`}>☎</a>}{primaryEmail && <a href={`mailto:${primaryEmail}`} onClick={(e) => e.stopPropagation()} aria-label={`Email ${primaryEmail}`} title={`Email ${primaryEmail}`}>✉</a>}{(primaryPhone || primaryEmail) && <button onClick={(e) => copyContact(primaryPhone || primaryEmail, e)} aria-label="Copy contact" title="Copy contact">{copiedContact === (primaryPhone || primaryEmail) ? "✓" : "⎘"}</button>}{!primaryPhone && !primaryEmail && <span>—</span>}</div></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>;
             })}
           </tbody></table>{!filtered.length && <div className="empty">No listings match these filters.</div>}</div>
         </section>}
@@ -338,20 +426,21 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             {reviewCount > 12 && <button className="show-all" onClick={() => { setStatus("Review"); setTab("listings"); }}>Show all {reviewCount} review listings →</button>}
           </article>
           <article className="panel duplicates"><div className="panel-heading"><div><span>DUPLICATE CANDIDATES</span><h2>{activeDuplicates.length} active relationships</h2></div></div>
-            {activeDuplicates.slice(0, 8).map((d) => <div className="duplicate-row" key={d.id}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>{sourceLabel(d.source_a)} #{d.source_listing_id_a} ↔ {sourceLabel(d.source_b)} #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>{d.review_status}</i></div>)}
+            {activeDuplicates.slice(0, 8).map((d) => <button className="duplicate-row" key={d.id} onClick={() => setComparisonId(d.id)}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>{sourceLabel(d.source_a)} #{d.source_listing_id_a} ↔ {sourceLabel(d.source_b)} #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>Compare →</i></button>)}
           </article>
         </section>}
       </main>
 
       {selected && <div className="drawer-backdrop" onMouseDown={() => setSelected(null)}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="drawer-head"><div><span>{sourceLabel(selected.source).toUpperCase()} #{selected.source_listing_id}</span><h2>{selected.title}</h2></div><button aria-label="Close" onClick={() => setSelected(null)}>×</button></div>
+        <div className="drawer-head"><div><span>{sourceLabel(selected.source).toUpperCase()} #{selected.source_listing_id}</span><h2>{selected.title}</h2></div><div className="drawer-head-actions"><button className={favoriteDraft ? "favorite active" : "favorite"} aria-label={favoriteDraft ? "Remove from favorites" : "Add to favorites"} title={favoriteDraft ? "Remove from favorites" : "Add to favorites"} onClick={() => setFavoriteDraft((value) => !value)}>★</button><button aria-label="Close" onClick={() => setSelected(null)}>×</button></div></div>
         <div className="drawer-price"><div><strong>{money(selected.price_value)}</strong><small>{selected.price_basis === "per_m2" ? "Advertised per m²" : "Asking price"}</small></div><div><strong>{ppsqm(selected.calculated_price_per_m2)}</strong><small>{selected.area_used_for_ppsqm_m2 ?? "—"} m² usable basis</small></div></div>
         <div className="drawer-tags"><span>{selected.normalized_location}</span><span>{selected.bedrooms ?? "—"} bedrooms</span>{selected.parking && <span>Parking</span>}{selected.sea_view && <span>Sea view</span>}{selected.new_construction && <span>New construction</span>}</div>
 
         {selected.ambiguity_flags?.length > 0 && <div className="warning-box"><strong>Verification needed</strong>{selected.ambiguity_flags.map((flag) => <p key={flag}>• {flag}</p>)}</div>}
 
+        <section className="drawer-section"><span>MY SHORTLIST</span><label className="notes-field"><small>Private notes</small><textarea value={notesDraft} maxLength={5000} onChange={(event) => setNotesDraft(event.target.value)} placeholder="Why it stands out, questions for the agent, viewing notes…" /></label><div className="annotation-actions"><label><input type="checkbox" checked={favoriteDraft} onChange={(event) => setFavoriteDraft(event.target.checked)} /> Favorite deal</label><button disabled={savingAnnotation || data.dataMode !== "live" || (favoriteDraft === selected.is_favorite && notesDraft.trim() === (selected.private_notes ?? ""))} onClick={saveAnnotation}>{savingAnnotation ? "Saving…" : "Save shortlist"}</button></div></section>
         <section className="drawer-section"><span>ACQUISITION STATUS</span><div className="status-editor"><select value={statusDraft} onChange={(e) => setStatusDraft(e.target.value as Status)}>{ALL_STATUSES.map((v) => <option key={v}>{v}</option>)}</select><button disabled={saving || statusDraft === selected.current_status || data.dataMode !== "live"} onClick={saveStatus}>{saving ? "Saving…" : "Save status"}</button></div>{notice && <p className="notice">{notice}</p>}</section>
-        <section className="drawer-section"><span>PROPERTY EVIDENCE</span><dl><div><dt>Floor</dt><dd>{selected.floor ?? "—"}{selected.total_floors ? ` / ${selected.total_floors}` : ""}</dd></div><div><dt>Condition</dt><dd>{selected.building_condition ?? "—"}</dd></div><div><dt>Seller</dt><dd>{selected.seller_type}{selected.agency_name ? ` · ${selected.agency_name}` : ""}</dd></div><div><dt>Published</dt><dd>{shortDate(selected.source_published_at)}</dd></div><div><dt>Modified</dt><dd>{shortDate(selected.source_modified_at)}</dd></div><div><dt>Confidence</dt><dd>{selected.extraction_confidence}</dd></div></dl></section>
+        <section className="drawer-section"><span>PROPERTY EVIDENCE</span><dl><div><dt>Floor</dt><dd>{selected.floor ?? "—"}{selected.total_floors ? ` / ${selected.total_floors}` : ""}</dd></div><div><dt>Condition</dt><dd>{selected.building_condition ?? "—"}</dd></div><div><dt>Seller</dt><dd>{selected.seller_type}{selected.agency_name ? ` · ${selected.agency_name}` : ""}</dd></div><div><dt>Published</dt><dd>{shortDate(selected.source_published_at)}</dd></div><div><dt>Modified</dt><dd>{shortDate(selected.source_modified_at)}</dd></div><div><dt>Confidence</dt><dd>{selected.extraction_confidence}</dd></div><div><dt>{selected.score_model_version ?? "V2"} score</dt><dd>{selected.total_score ?? "—"} · {selected.classification}</dd></div></dl>{selected.explanation && <p className="score-explanation">{selected.explanation}</p>}</section>
         <section className="drawer-section"><span>DESCRIPTION</span><p className="description">{selected.description_raw || "No description captured."}</p></section>
         <section className="drawer-section"><span>PRICE HISTORY</span>{selected.price_history?.length ? <div className="timeline">{selected.price_history.map((event, i) => <div key={`${event.observed_at}-${i}`}><i /><strong>{money(event.price_value)}</strong><small>{shortDate(event.observed_at)}{event.change_percent != null ? ` · ${event.change_percent.toFixed(1)}%` : " · baseline"}</small></div>)}</div> : <p className="muted">No trusted price event—the source value needs verification.</p>}</section>
         <section className="drawer-section"><span>PUBLIC CONTACT</span>{(() => {
@@ -365,6 +454,15 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         })()}</section>
         <a className="source-link" href={selected.canonical_url} target="_blank" rel="noreferrer">Open original {sourceLabel(selected.source)} listing ↗</a>
       </aside></div>}
+
+      {selectedComparison && comparisonA && comparisonB && <div className="compare-backdrop" onMouseDown={() => setComparisonId(null)}><section className="compare-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="compare-head"><div><span>DUPLICATE EVIDENCE</span><h2>Are these the same property?</h2><p>{selectedComparison.reason}</p></div><button aria-label="Close comparison" onClick={() => setComparisonId(null)}>×</button></div>
+        <div className="compare-confidence"><strong>{Math.round((selectedComparison.confidence_score ?? 0) * 100)}% match</strong><span>{selectedComparison.review_status}</span></div>
+        <div className="compare-grid">
+          {[comparisonA, comparisonB].map((listing) => <article key={listing.id}><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span><h3>{listing.title}</h3><small>#{listing.source_listing_id} · {listing.normalized_location}</small><dl><div><dt>Price</dt><dd>{money(listing.price_value)}</dd></div><div><dt>€/m²</dt><dd>{ppsqm(listing.calculated_price_per_m2)}</dd></div><div><dt>Area</dt><dd>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</dd></div><div><dt>Bedrooms</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Floor</dt><dd>{listing.floor ?? "—"}</dd></div><div><dt>Agency</dt><dd>{listing.agency_name ?? listing.seller_type}</dd></div></dl><button onClick={() => { setComparisonId(null); openListing(listing); }}>Inspect this offer</button></article>)}
+        </div>
+        <div className="evidence-row"><span className={selectedComparison.same_area ? "yes" : ""}>Area {selectedComparison.same_area ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_location ? "yes" : ""}>Location {selectedComparison.same_location ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_bedrooms ? "yes" : ""}>Bedrooms {selectedComparison.same_bedrooms ? "match" : "unconfirmed"}</span><span className={selectedComparison.similar_price ? "yes" : ""}>Price {selectedComparison.similar_price ? "similar" : "differs"}</span></div>
+      </section></div>}
     </div>
   );
 }

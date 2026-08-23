@@ -47,13 +47,17 @@ export type ChangeEvent = {
   change_amount: number | null; change_percent: number | null; changed_fields: string[];
 };
 
+export type DuplicateReviewStatus =
+  | "Pending" | "Confirmed Duplicate" | "Same Project" | "Not Duplicate" | "Needs Review";
+
 export type DuplicateCandidate = {
   id: string; listing_id_a: string; source_a: string; source_listing_id_a: string;
   listing_id_b: string; source_b: string; source_listing_id_b: string; confidence_score: number | null;
   same_phone: boolean | null; same_area: boolean | null; same_location: boolean | null;
   same_bedrooms: boolean | null; same_floor: boolean | null; similar_price: boolean | null;
   description_similarity: number | null; photo_similarity: number | null;
-  reason: string | null; review_status: string;
+  reason: string | null; review_status: DuplicateReviewStatus;
+  reviewed_at?: string | null; reviewed_by?: string | null; review_note?: string | null;
 };
 
 export type Scan = {

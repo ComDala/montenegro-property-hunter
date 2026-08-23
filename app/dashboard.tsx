@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { ChangeEvent, DashboardData, Listing, Status } from "./lib/types";
+import type { ChangeEvent, DashboardData, DuplicateReviewStatus, Listing, Status } from "./lib/types";
 
 const ALL_STATUSES: Status[] = [
   "New", "Review", "Watch", "Hot Deal", "Contact Agent", "Contacted",
@@ -116,7 +116,7 @@ function Icon({ children }: { children: React.ReactNode }) {
 
 export default function Dashboard({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [tab, setTab] = useState<"overview" | "changes" | "listings" | "review">("overview");
+  const [tab, setTab] = useState<"overview" | "deals" | "changes" | "listings" | "review">("overview");
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("All sources");
   const [location, setLocation] = useState("All locations");
@@ -129,8 +129,14 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [sort, setSort] = useState("ppsqm-asc");
   const [changeType, setChangeType] = useState("All changes");
   const [changeDays, setChangeDays] = useState(7);
+  const [watchlistAlertsOnly, setWatchlistAlertsOnly] = useState(false);
+  const [dealCompareIds, setDealCompareIds] = useState<string[]>([]);
   const [selected, setSelected] = useState<Listing | null>(null);
   const [comparisonId, setComparisonId] = useState<string | null>(null);
+  const [duplicateReviewDraft, setDuplicateReviewDraft] = useState<DuplicateReviewStatus>("Needs Review");
+  const [duplicateReviewNote, setDuplicateReviewNote] = useState("");
+  const [savingDuplicateReview, setSavingDuplicateReview] = useState(false);
+  const [duplicateReviewNotice, setDuplicateReviewNotice] = useState("");
   const [statusDraft, setStatusDraft] = useState<Status>("New");
   const [favoriteDraft, setFavoriteDraft] = useState(false);
   const [notesDraft, setNotesDraft] = useState("");
@@ -155,12 +161,20 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const locations = useMemo(() => ["All locations", ...Array.from(new Set(listings.map((l) => l.normalized_location).filter(Boolean) as string[])).sort()], [listings]);
   const activeDuplicates = useMemo(() => data.duplicates.filter((d) => d.review_status !== "Not Duplicate"), [data.duplicates]);
   const listingById = useMemo(() => new Map(listings.map((listing) => [listing.id, listing])), [listings]);
+  const dealListings = useMemo(() => listings.filter((listing) =>
+    listing.is_favorite || ["Hot Deal", "Contact Agent", "Contacted", "Viewing", "Negotiating"].includes(listing.current_status)
+  ).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0)), [listings]);
+  const comparedDeals = useMemo(() => dealCompareIds.map((id) => listingById.get(id)).filter((listing): listing is Listing => Boolean(listing)), [dealCompareIds, listingById]);
+  const favoriteIds = useMemo(() => new Set(listings.filter((listing) => listing.is_favorite).map((listing) => listing.id)), [listings]);
 
   const changesInWindow = useMemo(() => {
     const cutoff = new Date(data.generated_at).getTime() - changeDays * 86_400_000;
     return (data.changes ?? []).filter((event) => new Date(event.observed_at).getTime() >= cutoff);
   }, [data.changes, data.generated_at, changeDays]);
-  const recentChanges = useMemo(() => changesInWindow.filter((event) => changeType === "All changes" || event.event_type === changeType), [changesInWindow, changeType]);
+  const recentChanges = useMemo(() => changesInWindow.filter((event) =>
+    (changeType === "All changes" || event.event_type === changeType)
+    && (!watchlistAlertsOnly || favoriteIds.has(event.listing_id))
+  ), [changesInWindow, changeType, watchlistAlertsOnly, favoriteIds]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -206,6 +220,20 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       .sort((a, b) => a.median - b.median);
   }, [listings]);
 
+  const neighborhoodMedianByName = useMemo(() => new Map(neighborhoods.map((item) => [item.name, item.median])), [neighborhoods]);
+
+  const competingOffers = (listing: Listing) => activeDuplicates.flatMap((candidate) => {
+    if (candidate.listing_id_a === listing.id) {
+      const other = listingById.get(candidate.listing_id_b);
+      return other ? [{ candidate, listing: other }] : [];
+    }
+    if (candidate.listing_id_b === listing.id) {
+      const other = listingById.get(candidate.listing_id_a);
+      return other ? [{ candidate, listing: other }] : [];
+    }
+    return [];
+  });
+
   const openListing = (listing: Listing) => {
     setSelected(listing);
     setStatusDraft(listing.current_status);
@@ -214,14 +242,14 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     setNotice("");
   };
 
-  const exportFilteredCsv = () => {
+  const exportListingsCsv = (exportListings: Listing[], filename: string, message: string) => {
     const headers = [
       "Source", "Listing ID", "Title", "Location", "Price EUR", "Area m2", "EUR per m2",
       "Bedrooms", "Bathrooms", "Floor", "Parking", "Garage", "Sea view", "New construction",
       "Seller type", "Agency", "Status", "Classification", "Score", "Confidence",
       "Favorite", "Private notes", "Possible duplicate", "Ambiguity flags", "First seen", "Last seen", "Published", "Public contact", "Listing URL",
     ];
-    const rows = filtered.map((listing) => [
+    const rows = exportListings.map((listing) => [
       sourceLabel(listing.source), listing.source_listing_id, listing.title, listing.normalized_location,
       listing.price_value, listing.area_used_for_ppsqm_m2, listing.calculated_price_per_m2,
       listing.bedrooms, listing.bathrooms, listing.floor, listing.parking ? "Yes" : "No",
@@ -235,13 +263,40 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `montenegro-property-deals-${new Date().toISOString().slice(0, 10)}.csv`;
+    anchor.download = `${filename}-${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
-    setExportNotice(`${filtered.length} filtered listings exported to CSV.`);
+    setExportNotice(message);
     window.setTimeout(() => setExportNotice(""), 3000);
+  };
+
+  const exportFilteredCsv = () => exportListingsCsv(
+    filtered,
+    "montenegro-property-listings",
+    `${filtered.length} filtered listings exported to CSV.`,
+  );
+
+  const exportDealsCsv = () => {
+    const rows = comparedDeals.length ? comparedDeals : dealListings;
+    exportListingsCsv(
+      rows,
+      "montenegro-property-deals",
+      `${rows.length} ${comparedDeals.length ? "selected" : "shortlisted"} deals exported to CSV.`,
+    );
+  };
+
+  const toggleDealComparison = (listingId: string) => {
+    setDealCompareIds((current) => {
+      if (current.includes(listingId)) return current.filter((id) => id !== listingId);
+      if (current.length >= 4) {
+        setExportNotice("You can compare up to four deals at once.");
+        window.setTimeout(() => setExportNotice(""), 3000);
+        return current;
+      }
+      return [...current, listingId];
+    });
   };
 
   const copyContact = async (value: string, event?: React.MouseEvent) => {
@@ -300,6 +355,51 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     }
   };
 
+  const openDuplicateComparison = (candidateId: string) => {
+    const candidate = data.duplicates.find((item) => item.id === candidateId);
+    if (!candidate) return;
+    setComparisonId(candidateId);
+    setDuplicateReviewDraft(candidate.review_status);
+    setDuplicateReviewNote(candidate.review_note ?? "");
+    setDuplicateReviewNotice("");
+  };
+
+  const saveDuplicateReview = async () => {
+    if (!selectedComparison) return;
+    setSavingDuplicateReview(true);
+    setDuplicateReviewNotice("");
+    try {
+      const response = await fetch("/api/duplicate-review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          candidate_id: selectedComparison.id,
+          review_status: duplicateReviewDraft,
+          review_note: duplicateReviewNote,
+        }),
+      });
+      if (!response.ok) throw new Error();
+      const reviewedAt = new Date().toISOString();
+      setData((current) => ({
+        ...current,
+        duplicates: current.duplicates.map((candidate) => candidate.id === selectedComparison.id ? {
+          ...candidate,
+          review_status: duplicateReviewDraft,
+          review_note: duplicateReviewNote.trim() || null,
+          reviewed_at: reviewedAt,
+        } : candidate),
+      }));
+      setDuplicateReviewNotice("Decision saved. The evidence remains preserved.");
+      if (duplicateReviewDraft === "Not Duplicate") {
+        window.setTimeout(() => setComparisonId(null), 700);
+      }
+    } catch {
+      setDuplicateReviewNotice("Decision could not be saved. Please try again.");
+    } finally {
+      setSavingDuplicateReview(false);
+    }
+  };
+
   const selectedComparison = comparisonId ? activeDuplicates.find((candidate) => candidate.id === comparisonId) : null;
   const comparisonA = selectedComparison ? listingById.get(selectedComparison.listing_id_a) : null;
   const comparisonB = selectedComparison ? listingById.get(selectedComparison.listing_id_b) : null;
@@ -313,7 +413,8 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </div>
         <nav>
           <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><Icon>⌁</Icon><span>Market overview</span></button>
-          <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}><Icon>↕</Icon><span>What changed</span><em>{changesInWindow.length}</em></button>
+          <button className={tab === "deals" ? "active" : ""} onClick={() => setTab("deals")}><Icon>★</Icon><span>Deals workspace</span><em>{dealListings.length}</em></button>
+          <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}><Icon>↕</Icon><span>Alerts & changes</span><em>{changesInWindow.length}</em></button>
           <button className={tab === "listings" ? "active" : ""} onClick={() => setTab("listings")}><Icon>⌂</Icon><span>Listings</span><em>{trackedCount}</em></button>
           <button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}><Icon>◎</Icon><span>Review queue</span><em>{reviewCount}</em></button>
         </nav>
@@ -326,7 +427,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
       <main className="main">
         <header className="topbar">
-          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
+          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
           <div className="scan-chip"><span>Latest source scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{sourceLabel(data.latest_scan.source)} · {data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
@@ -373,14 +474,57 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           </section>
         </>}
 
+        {tab === "deals" && <section className="deals-workspace">
+          <div className="workspace-head deals-head"><div><span>DECISION WORKSPACE</span><h2>{dealListings.length} shortlisted deals</h2><p>Favorites and active acquisition-stage listings, kept separate from the full market inventory.</p></div><div className="workspace-actions"><p>{comparedDeals.length ? `${comparedDeals.length} selected for comparison` : "Select up to four properties"}</p><button disabled={!dealListings.length} onClick={exportDealsCsv}>⇩ Export {comparedDeals.length || dealListings.length} deals</button></div></div>
+          {exportNotice && <div className="export-notice">{exportNotice}</div>}
+          {!dealListings.length && <div className="deals-empty"><strong>Your decision workspace is ready.</strong><p>Favorite a listing or move it to Hot Deal, Contact Agent, Contacted, Viewing, or Negotiating to bring it here.</p><button onClick={() => setTab("listings")}>Explore listings →</button></div>}
+          {dealListings.length > 0 && <div className="deal-card-grid">
+            {dealListings.map((listing) => {
+              const neighborhoodMedian = neighborhoodMedianByName.get(listing.normalized_location ?? "");
+              const delta = neighborhoodMedian && listing.calculated_price_per_m2
+                ? ((listing.calculated_price_per_m2 - neighborhoodMedian) / neighborhoodMedian) * 100
+                : null;
+              const offers = competingOffers(listing);
+              const cheaperOffer = offers.map((offer) => offer.listing).filter((offer) => offer.price_value != null && listing.price_value != null && offer.price_value < listing.price_value).sort((a, b) => (a.price_value ?? 0) - (b.price_value ?? 0))[0];
+              const isCompared = dealCompareIds.includes(listing.id);
+              return <article className={isCompared ? "deal-card selected" : "deal-card"} key={listing.id}>
+                <div className="deal-card-top"><label><input type="checkbox" checked={isCompared} onChange={() => toggleDealComparison(listing.id)} /> Compare</label><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span></div>
+                <button className="deal-title" onClick={() => openListing(listing)}><strong>{listing.title || `Listing #${listing.source_listing_id}`}</strong><small>#{listing.source_listing_id} · {listing.normalized_location || "Unresolved location"}</small></button>
+                <div className="deal-values"><div><small>ASKING</small><strong>{money(listing.price_value)}</strong></div><div><small>VALUE</small><strong>{ppsqm(listing.calculated_price_per_m2)}</strong></div><div><small>VS. AREA MEDIAN</small><strong className={delta != null && delta < 0 ? "positive" : ""}>{delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)}%`}</strong></div></div>
+                <div className="deal-signals"><span>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "Area unresolved"}</span><span>{listing.bedrooms ?? "—"} bed</span>{listing.parking && <span>Parking</span>}{listing.sea_view && <span>Sea view</span>}</div>
+                <div className="deal-meta"><span className="status-pill">{listing.current_status}</span><span>Score {listing.total_score ?? "—"}</span><span>{listing.price_history.length > 1 ? `${listing.price_history.length} price events` : "Price baseline"}</span></div>
+                {cheaperOffer && <button className="competing-alert" onClick={() => openListing(cheaperOffer)}><strong>Cheaper competing offer</strong><span>{sourceLabel(cheaperOffer.source)} · {money(cheaperOffer.price_value)} →</span></button>}
+                {!cheaperOffer && offers.length > 0 && <div className="competing-note">{offers.length} linked competing offer{offers.length === 1 ? "" : "s"}</div>}
+                <button className="inspect-deal" onClick={() => openListing(listing)}>Inspect deal →</button>
+              </article>;
+            })}
+          </div>}
+
+          {comparedDeals.length >= 2 && <section className="deal-comparison">
+            <div className="panel-heading"><div><span>SIDE-BY-SIDE</span><h2>Compare selected deals</h2></div><button onClick={() => setDealCompareIds([])}>Clear selection</button></div>
+            <div className="comparison-scroll"><table><thead><tr><th>Measure</th>{comparedDeals.map((listing) => <th key={listing.id}>{sourceLabel(listing.source)} #{listing.source_listing_id}</th>)}</tr></thead><tbody>
+              <tr><td>Property</td>{comparedDeals.map((listing) => <td key={listing.id}><button className="comparison-link" onClick={() => openListing(listing)}>{listing.title}</button></td>)}</tr>
+              <tr><td>Location</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.normalized_location || "—"}</td>)}</tr>
+              <tr><td>Asking price</td>{comparedDeals.map((listing) => <td key={listing.id}><strong>{money(listing.price_value)}</strong></td>)}</tr>
+              <tr><td>Usable area</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td>)}</tr>
+              <tr><td>€/m²</td>{comparedDeals.map((listing) => <td key={listing.id}><strong className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</strong></td>)}</tr>
+              <tr><td>Features</td>{comparedDeals.map((listing) => <td key={listing.id}>{[listing.parking && "Parking", listing.garage && "Garage", listing.sea_view && "Sea view", listing.new_construction && "New build"].filter(Boolean).join(" · ") || "—"}</td>)}</tr>
+              <tr><td>Agency / seller</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.agency_name ?? listing.seller_type}</td>)}</tr>
+              <tr><td>Status</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.current_status}</td>)}</tr>
+              <tr><td>Private note</td>{comparedDeals.map((listing) => <td key={listing.id}>{listing.private_notes || "—"}</td>)}</tr>
+            </tbody></table></div>
+          </section>}
+        </section>}
+
         {tab === "changes" && <section className="change-workspace">
-          <div className="workspace-head"><div><span>HISTORICAL TRACKING</span><h2>{recentChanges.length} recorded events</h2></div><p>Built from append-only observations—older values remain preserved.</p></div>
+          <div className="workspace-head"><div><span>ALERT CENTER · HISTORICAL TRACKING</span><h2>{recentChanges.length} recorded events</h2></div><p>Price reductions, removals and important changes—built from append-only history.</p></div>
           <div className="change-summary">
             {(["new", "price_reduced", "price_increased", "modified", "removed"] as ChangeEvent["event_type"][]).map((type) => <button key={type} className={changeType === type ? "active" : ""} onClick={() => setChangeType(changeType === type ? "All changes" : type)}><span className={`change-icon ${changeTone(type)}`}>{type === "new" ? "+" : type === "price_reduced" ? "↓" : type === "price_increased" ? "↑" : type === "removed" ? "×" : "~"}</span><strong>{changesInWindow.filter((event) => event.event_type === type).length}</strong><small>{CHANGE_LABELS[type]}</small></button>)}
           </div>
           <div className="change-controls">
             <select value={changeDays} onChange={(event) => setChangeDays(Number(event.target.value))}><option value={1}>Last 24 hours</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option></select>
             <select value={changeType} onChange={(event) => setChangeType(event.target.value)}><option>All changes</option><option value="new">New listings</option><option value="price_reduced">Price reductions</option><option value="price_increased">Price increases</option><option value="modified">Other updates</option><option value="removed">Removed</option></select>
+            <label className="toggle alert-toggle"><input type="checkbox" checked={watchlistAlertsOnly} onChange={(event) => setWatchlistAlertsOnly(event.target.checked)} /><span />Watchlist only</label>
           </div>
           <div className="change-list">
             {recentChanges.map((event, index) => {
@@ -426,7 +570,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             {reviewCount > 12 && <button className="show-all" onClick={() => { setStatus("Review"); setTab("listings"); }}>Show all {reviewCount} review listings →</button>}
           </article>
           <article className="panel duplicates"><div className="panel-heading"><div><span>DUPLICATE CANDIDATES</span><h2>{activeDuplicates.length} active relationships</h2></div></div>
-            {activeDuplicates.slice(0, 8).map((d) => <button className="duplicate-row" key={d.id} onClick={() => setComparisonId(d.id)}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>{sourceLabel(d.source_a)} #{d.source_listing_id_a} ↔ {sourceLabel(d.source_b)} #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>Compare →</i></button>)}
+            {activeDuplicates.slice(0, 8).map((d) => <button className="duplicate-row" key={d.id} onClick={() => openDuplicateComparison(d.id)}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>{sourceLabel(d.source_a)} #{d.source_listing_id_a} ↔ {sourceLabel(d.source_b)} #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>{d.review_status === "Pending" ? "Review" : d.review_status} →</i></button>)}
           </article>
         </section>}
       </main>
@@ -462,6 +606,9 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           {[comparisonA, comparisonB].map((listing) => <article key={listing.id}><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span><h3>{listing.title}</h3><small>#{listing.source_listing_id} · {listing.normalized_location}</small><dl><div><dt>Price</dt><dd>{money(listing.price_value)}</dd></div><div><dt>€/m²</dt><dd>{ppsqm(listing.calculated_price_per_m2)}</dd></div><div><dt>Area</dt><dd>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</dd></div><div><dt>Bedrooms</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Floor</dt><dd>{listing.floor ?? "—"}</dd></div><div><dt>Agency</dt><dd>{listing.agency_name ?? listing.seller_type}</dd></div></dl><button onClick={() => { setComparisonId(null); openListing(listing); }}>Inspect this offer</button></article>)}
         </div>
         <div className="evidence-row"><span className={selectedComparison.same_area ? "yes" : ""}>Area {selectedComparison.same_area ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_location ? "yes" : ""}>Location {selectedComparison.same_location ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_bedrooms ? "yes" : ""}>Bedrooms {selectedComparison.same_bedrooms ? "match" : "unconfirmed"}</span><span className={selectedComparison.similar_price ? "yes" : ""}>Price {selectedComparison.similar_price ? "similar" : "differs"}</span></div>
+        <div className="duplicate-decision"><div><span>YOUR DECISION</span><h3>Classify this relationship</h3><p>The candidate evidence remains stored even when you decide these are not duplicates.</p></div><div className="decision-options">
+          {(["Confirmed Duplicate", "Same Project", "Not Duplicate", "Needs Review"] as DuplicateReviewStatus[]).map((value) => <button className={duplicateReviewDraft === value ? "active" : ""} key={value} onClick={() => setDuplicateReviewDraft(value)}>{value}</button>)}
+        </div><textarea value={duplicateReviewNote} maxLength={1000} onChange={(event) => setDuplicateReviewNote(event.target.value)} placeholder="Optional review note—for example, same development but different floor…" /><div className="decision-save"><span>{duplicateReviewNotice}</span><button disabled={savingDuplicateReview || data.dataMode !== "live"} onClick={saveDuplicateReview}>{savingDuplicateReview ? "Saving…" : "Save decision"}</button></div></div>
       </section></div>}
     </div>
   );

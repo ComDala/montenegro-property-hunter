@@ -185,7 +185,7 @@ function draftNumber(value: string) {
 
 export default function Dashboard({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [tab, setTab] = useState<"overview" | "deals" | "changes" | "listings" | "review">("overview");
+  const [tab, setTab] = useState<"overview" | "sources" | "deals" | "changes" | "listings" | "review">("overview");
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("All sources");
   const [location, setLocation] = useState("All locations");
@@ -194,6 +194,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [targetOnly, setTargetOnly] = useState(false);
   const [cleanOnly, setCleanOnly] = useState(false);
   const [issuesOnly, setIssuesOnly] = useState(false);
+  const [photosOnly, setPhotosOnly] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sort, setSort] = useState("ppsqm-asc");
   const [changeType, setChangeType] = useState("All changes");
@@ -239,6 +240,27 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   ).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0)), [listings]);
   const comparedDeals = useMemo(() => dealCompareIds.map((id) => listingById.get(id)).filter((listing): listing is Listing => Boolean(listing)), [dealCompareIds, listingById]);
   const favoriteIds = useMemo(() => new Set(listings.filter((listing) => listing.is_favorite).map((listing) => listing.id)), [listings]);
+  const sourceHealth = useMemo(() => sources.slice(1).map((sourceName) => {
+    const inventory = listings.filter((listing) => listing.source === sourceName);
+    const scans = (data.scan_history ?? []).filter((scan) => scan.source === sourceName)
+      .sort((a, b) => new Date(b.started_at ?? 0).getTime() - new Date(a.started_at ?? 0).getTime());
+    const latestScan = scans[0];
+    const latestTime = latestScan?.started_at ? new Date(latestScan.started_at).getTime() : 0;
+    const ageDays = latestTime ? Math.max(0, (new Date(data.generated_at).getTime() - latestTime) / 86_400_000) : Infinity;
+    const opened = latestScan?.pages_successful ?? 0;
+    const failed = latestScan?.pages_failed ?? 0;
+    return {
+      source: sourceName,
+      inventory: inventory.length,
+      latestScan,
+      ageDays,
+      reliability: opened + failed ? opened / (opened + failed) * 100 : null,
+      photos: inventory.filter((listing) => listing.photo_urls?.length).length,
+      contacts: inventory.filter((listing) => contactParts(listing.public_contact).phones.length || contactParts(listing.public_contact).emails.length).length,
+      clean: inventory.filter((listing) => listing.clean_baseline_eligible).length,
+      targets: inventory.filter((listing) => (listing.calculated_price_per_m2 ?? Infinity) <= 2300).length,
+    };
+  }).sort((a, b) => a.ageDays - b.ageDays), [sources, listings, data.scan_history, data.generated_at]);
 
   const changesInWindow = useMemo(() => {
     const cutoff = new Date(data.generated_at).getTime() - changeDays * 86_400_000;
@@ -267,6 +289,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         && (!targetOnly || (l.calculated_price_per_m2 ?? Infinity) <= 2300)
         && (!cleanOnly || l.clean_baseline_eligible)
         && (!issuesOnly || l.ambiguity_flags?.length > 0 || l.possible_duplicate || l.extraction_confidence === "low")
+        && (!photosOnly || Boolean(l.photo_urls?.length))
         && (!favoritesOnly || l.is_favorite);
     });
     return result.sort((a, b) => {
@@ -276,7 +299,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       if (sort === "newest") return new Date(b.source_published_at ?? 0).getTime() - new Date(a.source_published_at ?? 0).getTime();
       return (b.total_score ?? 0) - (a.total_score ?? 0);
     });
-  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, favoritesOnly, sort]);
+  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, photosOnly, favoritesOnly, sort]);
 
   const opportunities = useMemo(() => listings
     .filter((l) => l.clean_baseline_eligible && (l.calculated_price_per_m2 ?? Infinity) <= 2300)
@@ -555,6 +578,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </div>
         <nav>
           <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><Icon>⌁</Icon><span>Market overview</span></button>
+          <button className={tab === "sources" ? "active" : ""} onClick={() => setTab("sources")}><Icon>◫</Icon><span>Source health</span><em>{sourceHealth.length}</em></button>
           <button className={tab === "deals" ? "active" : ""} onClick={() => setTab("deals")}><Icon>★</Icon><span>Deals workspace</span><em>{dealListings.length}</em></button>
           <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}><Icon>↕</Icon><span>Alerts & changes</span><em>{changesInWindow.length}</em></button>
           <button className={tab === "listings" ? "active" : ""} onClick={() => setTab("listings")}><Icon>⌂</Icon><span>Listings</span><em>{trackedCount}</em></button>
@@ -569,7 +593,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
       <main className="main">
         <header className="topbar">
-          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
+          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "sources" ? "Know what you can trust." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
           <div className="scan-chip"><span>Latest source scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{sourceLabel(data.latest_scan.source)} · {data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
@@ -616,6 +640,26 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           </section>
         </>}
 
+        {tab === "sources" && <section className="source-workspace">
+          <div className="workspace-head"><div><span>FEED COVERAGE & RELIABILITY</span><h2>{sourceHealth.length} approved market sources</h2><p>Freshness and data coverage are measured separately, so an older agency baseline never looks like a daily feed.</p></div><button className="source-view-all" onClick={() => { setSource("All sources"); setTab("listings"); }}>Explore all inventory →</button></div>
+          <div className="source-health-grid">
+            {sourceHealth.map((item) => {
+              const freshness = item.ageDays <= 1.5 ? "Current" : item.ageDays <= 4 ? "Recent" : "Baseline";
+              const photoRate = item.inventory ? item.photos / item.inventory * 100 : 0;
+              const contactRate = item.inventory ? item.contacts / item.inventory * 100 : 0;
+              const cleanRate = item.inventory ? item.clean / item.inventory * 100 : 0;
+              return <article className="source-health-card" key={item.source}>
+                <div className="source-health-head"><span className={`source-pill source-${item.source}`}>{sourceLabel(item.source)}</span><i className={`freshness ${freshness.toLowerCase()}`}>{freshness}</i></div>
+                <div className="source-health-total"><strong>{item.inventory}</strong><span>tracked listings</span></div>
+                <dl><div><dt>Latest scan</dt><dd>{shortDate(item.latestScan?.started_at)}</dd></div><div><dt>Page reliability</dt><dd>{item.reliability == null ? "—" : `${item.reliability.toFixed(1)}%`}</dd></div><div><dt>Target deals</dt><dd>{item.targets}</dd></div><div><dt>Scans stored</dt><dd>{(data.scan_history ?? []).filter((scan) => scan.source === item.source).length}</dd></div></dl>
+                <div className="coverage-list"><div><span>Clean pricing</span><b>{item.clean}/{item.inventory}</b><i><em style={{ width: `${cleanRate}%` }} /></i></div><div><span>Public contact</span><b>{item.contacts}/{item.inventory}</b><i><em style={{ width: `${contactRate}%` }} /></i></div><div><span>Photo gallery</span><b>{item.photos}/{item.inventory}</b><i><em style={{ width: `${photoRate}%` }} /></i></div></div>
+                <button onClick={() => { setSource(item.source); setTab("listings"); }}>View {sourceLabel(item.source)} listings →</button>
+              </article>;
+            })}
+          </div>
+          <div className="source-legend"><div><span className="freshness current">Current</span><p>Scanned within roughly 36 hours</p></div><div><span className="freshness recent">Recent</span><p>Useful recent snapshot, not daily</p></div><div><span className="freshness baseline">Baseline</span><p>Preserved inventory awaiting its next refresh</p></div></div>
+        </section>}
+
         {tab === "deals" && <section className="deals-workspace">
           <div className="workspace-head deals-head"><div><span>DECISION WORKSPACE</span><h2>{dealListings.length} shortlisted deals</h2><p>Favorites and active acquisition-stage listings, kept separate from the full market inventory.</p></div><div className="workspace-actions"><p>{comparedDeals.length ? `${comparedDeals.length} selected for comparison` : "Select up to four properties"}</p><button disabled={!dealListings.length} onClick={exportDealsCsv}>⇩ Export {comparedDeals.length || dealListings.length} deals</button></div></div>
           {exportNotice && <div className="export-notice">{exportNotice}</div>}
@@ -630,6 +674,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
               const cheaperOffer = offers.map((offer) => offer.listing).filter((offer) => offer.price_value != null && listing.price_value != null && offer.price_value < listing.price_value).sort((a, b) => (a.price_value ?? 0) - (b.price_value ?? 0))[0];
               const isCompared = dealCompareIds.includes(listing.id);
               return <article className={isCompared ? "deal-card selected" : "deal-card"} key={listing.id}>
+                {listing.photo_urls?.[0] && <button className="deal-photo" onClick={() => openListing(listing)} aria-label={`Open ${listing.title || "property"}`}><ListingImage className="deal-photo-image" src={listing.photo_urls[0]} alt={`${listing.title || "Property"} preview`} /><span>{listing.photo_urls.length} photo{listing.photo_urls.length === 1 ? "" : "s"}</span></button>}
                 <div className="deal-card-top"><label><input type="checkbox" checked={isCompared} onChange={() => toggleDealComparison(listing.id)} /> Compare</label><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span></div>
                 <button className="deal-title" onClick={() => openListing(listing)}><strong>{listing.title || `Listing #${listing.source_listing_id}`}</strong><small>#{listing.source_listing_id} · {listing.normalized_location || "Unresolved location"}</small></button>
                 <div className="deal-values"><div><small>ASKING</small><strong>{money(listing.price_value)}</strong></div><div><small>VALUE</small><strong>{ppsqm(listing.calculated_price_per_m2)}</strong></div><div><small>VS. AREA MEDIAN</small><strong className={delta != null && delta < 0 ? "positive" : ""}>{delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)}%`}</strong></div></div>
@@ -696,6 +741,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             <label className="toggle"><input type="checkbox" checked={targetOnly} onChange={(e) => setTargetOnly(e.target.checked)} /><span />≤ €2,300</label>
             <label className="toggle"><input type="checkbox" checked={cleanOnly} onChange={(e) => setCleanOnly(e.target.checked)} /><span />Clean only</label>
             <label className="toggle"><input type="checkbox" checked={issuesOnly} onChange={(e) => setIssuesOnly(e.target.checked)} /><span />Issues only</label>
+            <label className="toggle"><input type="checkbox" checked={photosOnly} onChange={(e) => setPhotosOnly(e.target.checked)} /><span />Photos only</label>
             <label className="toggle"><input type="checkbox" checked={favoritesOnly} onChange={(e) => setFavoritesOnly(e.target.checked)} /><span />Favorites ({favoriteCount})</label>
           </div>
           {exportNotice && <div className="export-notice">{exportNotice}</div>}

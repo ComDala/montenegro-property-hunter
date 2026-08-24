@@ -114,6 +114,14 @@ function Icon({ children }: { children: React.ReactNode }) {
   return <span className="icon">{children}</span>;
 }
 
+function ListingImage({ src, alt, className, eager = false }: { src: string; alt: string; className: string; eager?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <span className={`${className} remote-image-fallback`} aria-label="Image unavailable">⌂</span>;
+  // Remote listing hosts vary by source, so a native lazy image is the safe cross-source loader here.
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img className={className} src={src} alt={alt} loading={eager ? "eager" : "lazy"} decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+}
+
 type WorkflowDraft = {
   purchase_price: string; transfer_tax_cost: string; legal_notary_cost: string;
   agency_fee_cost: string; renovation_budget: string; furnishing_budget: string;
@@ -193,6 +201,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [watchlistAlertsOnly, setWatchlistAlertsOnly] = useState(false);
   const [dealCompareIds, setDealCompareIds] = useState<string[]>([]);
   const [selected, setSelected] = useState<Listing | null>(null);
+  const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
   const [comparisonId, setComparisonId] = useState<string | null>(null);
   const [duplicateReviewDraft, setDuplicateReviewDraft] = useState<DuplicateReviewStatus>("Needs Review");
   const [duplicateReviewNote, setDuplicateReviewNote] = useState("");
@@ -300,6 +309,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
   const openListing = (listing: Listing) => {
     setSelected(listing);
+    setSelectedPhotoIndex(0);
     setStatusDraft(listing.current_status);
     setFavoriteDraft(listing.is_favorite);
     setNotesDraft(listing.private_notes ?? "");
@@ -694,7 +704,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
               const contacts = contactParts(listing.public_contact);
               const primaryPhone = contacts.phones[0];
               const primaryEmail = contacts.emails[0];
-              return <tr key={listing.id} onClick={() => openListing(listing)}><td><strong>{listing.is_favorite && <span className="favorite-marker">★</span>}{listing.title || "Untitled listing"}</strong><small>#{listing.source_listing_id}{listing.possible_duplicate ? " · possible duplicate" : ""}{listing.ambiguity_flags?.length ? ` · ${listing.ambiguity_flags.length} issue${listing.ambiguity_flags.length === 1 ? "" : "s"}` : ""}{listing.private_notes ? " · private note" : ""}</small></td><td><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><div className="contact-mini">{primaryPhone && <a href={`tel:${phoneHref(primaryPhone)}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${primaryPhone}`} title={`Call ${primaryPhone}`}>☎</a>}{primaryEmail && <a href={`mailto:${primaryEmail}`} onClick={(e) => e.stopPropagation()} aria-label={`Email ${primaryEmail}`} title={`Email ${primaryEmail}`}>✉</a>}{(primaryPhone || primaryEmail) && <button onClick={(e) => copyContact(primaryPhone || primaryEmail, e)} aria-label="Copy contact" title="Copy contact">{copiedContact === (primaryPhone || primaryEmail) ? "✓" : "⎘"}</button>}{!primaryPhone && !primaryEmail && <span>—</span>}</div></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>;
+              return <tr key={listing.id} onClick={() => openListing(listing)}><td><div className="property-cell">{listing.photo_urls?.[0] ? <ListingImage className="listing-thumb" src={listing.photo_urls[0]} alt={`${listing.title || "Property"} thumbnail`} /> : <span className="listing-thumb listing-thumb-placeholder" aria-hidden="true">⌂</span>}<div><strong>{listing.is_favorite && <span className="favorite-marker">★</span>}{listing.title || "Untitled listing"}</strong><small>#{listing.source_listing_id}{listing.photo_urls?.length ? ` · ${listing.photo_urls.length} photo${listing.photo_urls.length === 1 ? "" : "s"}` : ""}{listing.possible_duplicate ? " · possible duplicate" : ""}{listing.ambiguity_flags?.length ? ` · ${listing.ambiguity_flags.length} issue${listing.ambiguity_flags.length === 1 ? "" : "s"}` : ""}{listing.private_notes ? " · private note" : ""}</small></div></div></td><td><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span></td><td>{listing.normalized_location || "—"}</td><td>{money(listing.price_value)}</td><td>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</td><td><b className={`ppsqm ${toneFor(listing)}`}>{ppsqm(listing.calculated_price_per_m2)}</b></td><td><div className="contact-mini">{primaryPhone && <a href={`tel:${phoneHref(primaryPhone)}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${primaryPhone}`} title={`Call ${primaryPhone}`}>☎</a>}{primaryEmail && <a href={`mailto:${primaryEmail}`} onClick={(e) => e.stopPropagation()} aria-label={`Email ${primaryEmail}`} title={`Email ${primaryEmail}`}>✉</a>}{(primaryPhone || primaryEmail) && <button onClick={(e) => copyContact(primaryPhone || primaryEmail, e)} aria-label="Copy contact" title="Copy contact">{copiedContact === (primaryPhone || primaryEmail) ? "✓" : "⎘"}</button>}{!primaryPhone && !primaryEmail && <span>—</span>}</div></td><td><span className={`confidence ${listing.extraction_confidence}`}>{listing.extraction_confidence}</span></td><td><span className="status-pill">{listing.current_status}</span></td></tr>;
             })}
           </tbody></table>{!filtered.length && <div className="empty">No listings match these filters.</div>}</div>
         </section>}
@@ -712,6 +722,15 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
       {selected && <div className="drawer-backdrop" onMouseDown={() => setSelected(null)}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}>
         <div className="drawer-head"><div><span>{sourceLabel(selected.source).toUpperCase()} #{selected.source_listing_id}</span><h2>{selected.title}</h2></div><div className="drawer-head-actions"><button className={favoriteDraft ? "favorite active" : "favorite"} aria-label={favoriteDraft ? "Remove from favorites" : "Add to favorites"} title={favoriteDraft ? "Remove from favorites" : "Add to favorites"} onClick={() => setFavoriteDraft((value) => !value)}>★</button><button aria-label="Close" onClick={() => setSelected(null)}>×</button></div></div>
+        {selected.photo_urls?.length ? <div className="property-gallery">
+          <div className="gallery-stage">
+            <ListingImage className="gallery-main" src={selected.photo_urls[Math.min(selectedPhotoIndex, selected.photo_urls.length - 1)]} alt={`${selected.title || "Property"} photo ${selectedPhotoIndex + 1}`} eager />
+            <span className="gallery-count">{selectedPhotoIndex + 1} / {selected.photo_urls.length}</span>
+            {selected.photo_urls.length > 1 && <><button className="gallery-nav previous" aria-label="Previous photo" onClick={() => setSelectedPhotoIndex((index) => (index - 1 + selected.photo_urls!.length) % selected.photo_urls!.length)}>‹</button><button className="gallery-nav next" aria-label="Next photo" onClick={() => setSelectedPhotoIndex((index) => (index + 1) % selected.photo_urls!.length)}>›</button></>}
+          </div>
+          {selected.photo_urls.length > 1 && <div className="gallery-thumbs" aria-label="Property photos">{selected.photo_urls.map((url, index) => <button key={`${url}-${index}`} className={index === selectedPhotoIndex ? "active" : ""} aria-label={`Show photo ${index + 1}`} onClick={() => setSelectedPhotoIndex(index)}><ListingImage className="gallery-thumb" src={url} alt="" /></button>)}</div>}
+          <small className="gallery-caption">Photos load from the original public listing and are not copied into the database.</small>
+        </div> : <div className="gallery-empty"><span>⌂</span><div><strong>No captured photos yet</strong><small>Open the original listing to view its current images.</small></div></div>}
         <div className="drawer-price"><div><strong>{money(selected.price_value)}</strong><small>{selected.price_basis === "per_m2" ? "Advertised per m²" : "Asking price"}</small></div><div><strong>{ppsqm(selected.calculated_price_per_m2)}</strong><small>{selected.area_used_for_ppsqm_m2 ?? "—"} m² usable basis</small></div></div>
         <div className="drawer-tags"><span>{selected.normalized_location}</span><span>{selected.bedrooms ?? "—"} bedrooms</span>{selected.parking && <span>Parking</span>}{selected.sea_view && <span>Sea view</span>}{selected.new_construction && <span>New construction</span>}</div>
 

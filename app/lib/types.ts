@@ -58,6 +58,7 @@ export type Listing = {
   elevator: boolean | null; public_contact: string | null;
   source_published_at: string | null; source_modified_at: string | null;
   description_raw: string | null; ambiguity_flags: string[];
+  photo_urls?: string[];
   extraction_confidence: "high" | "medium" | "low" | "unknown";
   total_score: number | null; classification: string | null; explanation: string | null;
   score_model_version: string | null; is_favorite: boolean; private_notes: string | null;

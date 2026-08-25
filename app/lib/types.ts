@@ -100,9 +100,28 @@ export type DuplicateRefresh = {
   error_summary?: string | null;
 };
 
+export type SavedSearch = {
+  id: string;
+  name: string;
+  locations: string[];
+  sources: string[];
+  max_price: number | null;
+  max_price_per_m2: number | null;
+  min_bedrooms: number | null;
+  parking_required: boolean;
+  sea_view_required: boolean;
+  photos_required: boolean;
+  digest_frequency: "daily" | "weekly";
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type DashboardData = {
   generated_at: string; latest_scan: Scan; listings: Listing[];
   scan_history: Scan[]; changes: ChangeEvent[]; duplicates: DuplicateCandidate[];
   duplicate_refresh?: DuplicateRefresh;
+  saved_searches?: SavedSearch[];
   dataMode?: "live" | "preview";
 };

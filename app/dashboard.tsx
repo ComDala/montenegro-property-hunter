@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { ChangeEvent, DashboardData, DuplicateCandidate, DuplicateReviewStatus, Listing, ListingWorkflow, Status } from "./lib/types";
+import { useMemo, useState } from "react";
+import type { ChangeEvent, DashboardData, DuplicateCandidate, DuplicateReviewStatus, Listing, ListingWorkflow, SavedSearch, Status } from "./lib/types";
 
 const ALL_STATUSES: Status[] = [
   "New", "Review", "Watch", "Hot Deal", "Contact Agent", "Contacted",
@@ -115,12 +115,11 @@ function Icon({ children }: { children: React.ReactNode }) {
 }
 
 function ListingImage({ src, alt, className, eager = false }: { src: string; alt: string; className: string; eager?: boolean }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
-  if (failed) return <span className={`${className} remote-image-fallback`} aria-label="Image unavailable">⌂</span>;
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (failedSrc === src) return <span className={`${className} remote-image-fallback`} aria-label="Image unavailable">⌂</span>;
   // Remote listing hosts vary by source, so a native lazy image is the safe cross-source loader here.
   // eslint-disable-next-line @next/next/no-img-element
-  return <img className={className} src={src} alt={alt} loading={eager ? "eager" : "lazy"} fetchPriority={eager ? "high" : "auto"} decoding="async" draggable={false} referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+  return <img className={className} src={src} alt={alt} loading={eager ? "eager" : "lazy"} fetchPriority={eager ? "high" : "auto"} decoding="async" draggable={false} referrerPolicy="no-referrer" onError={() => setFailedSrc(src)} />;
 }
 
 type DuplicateGroup = {
@@ -177,6 +176,29 @@ type WorkflowDraft = {
   next_action: string;
 };
 
+type SearchDraft = {
+  name: string; location: string; source: string; maxPrice: string;
+  maxPpsqm: string; minBedrooms: string; parking: boolean;
+  seaView: boolean; photos: boolean; frequency: "daily" | "weekly";
+};
+
+const blankSearch: SearchDraft = {
+  name: "", location: "All locations", source: "All sources", maxPrice: "",
+  maxPpsqm: "2300", minBedrooms: "", parking: false,
+  seaView: false, photos: false, frequency: "daily",
+};
+
+function matchesSavedSearch(listing: Listing, search: SavedSearch) {
+  return (!search.locations.length || Boolean(listing.normalized_location && search.locations.includes(listing.normalized_location)))
+    && (!search.sources.length || search.sources.includes(listing.source))
+    && (search.max_price == null || (listing.price_value != null && listing.price_value <= search.max_price))
+    && (search.max_price_per_m2 == null || (listing.calculated_price_per_m2 != null && listing.calculated_price_per_m2 <= search.max_price_per_m2))
+    && (search.min_bedrooms == null || (listing.bedrooms != null && listing.bedrooms >= search.min_bedrooms))
+    && (!search.parking_required || listing.parking === true || listing.garage === true)
+    && (!search.sea_view_required || listing.sea_view === true)
+    && (!search.photos_required || Boolean(listing.photo_urls?.length));
+}
+
 const blankWorkflow: WorkflowDraft = {
   purchase_price: "", transfer_tax_cost: "", legal_notary_cost: "",
   agency_fee_cost: "", renovation_budget: "", furnishing_budget: "",
@@ -230,7 +252,7 @@ function draftNumber(value: string) {
 
 export default function Dashboard({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [tab, setTab] = useState<"overview" | "sources" | "quality" | "deals" | "changes" | "listings" | "review">("overview");
+  const [tab, setTab] = useState<"overview" | "sources" | "quality" | "digest" | "deals" | "changes" | "listings" | "review">("overview");
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("All sources");
   const [location, setLocation] = useState("All locations");
@@ -267,8 +289,15 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [copiedContact, setCopiedContact] = useState("");
   const [refreshingDuplicates, setRefreshingDuplicates] = useState(false);
   const [duplicateRefreshNotice, setDuplicateRefreshNotice] = useState("");
+  const [searchDraft, setSearchDraft] = useState<SearchDraft>(blankSearch);
+  const [savingSearch, setSavingSearch] = useState(false);
+  const [savedSearchNotice, setSavedSearchNotice] = useState("");
+  const [activeSavedSearchId, setActiveSavedSearchId] = useState<string | null>(null);
+  const [enrichingPhotos, setEnrichingPhotos] = useState(false);
+  const [photoEnrichmentNotice, setPhotoEnrichmentNotice] = useState("");
 
   const listings = data.listings;
+  const savedSearches = useMemo(() => data.saved_searches ?? [], [data.saved_searches]);
   const validPrices = listings
     .filter((l) => l.clean_baseline_eligible)
     .map((l) => l.calculated_price_per_m2)
@@ -413,6 +442,22 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     && (!watchlistAlertsOnly || favoriteIds.has(event.listing_id))
   ), [changesInWindow, changeType, watchlistAlertsOnly, favoriteIds]);
 
+  const activeSavedSearch = useMemo(() => savedSearches.find((item) => item.id === activeSavedSearchId) ?? null, [savedSearches, activeSavedSearchId]);
+  const digestCards = useMemo(() => savedSearches.map((search) => {
+    const days = search.digest_frequency === "weekly" ? 7 : 1;
+    const cutoff = new Date(data.generated_at).getTime() - days * 86_400_000;
+    const events = (data.changes ?? []).filter((event) => new Date(event.observed_at).getTime() >= cutoff);
+    const eventByListing = new Map(events.map((event) => [event.listing_id, event]));
+    const matching = listings.filter((listing) => matchesSavedSearch(listing, search));
+    const recent = matching.filter((listing) => new Date(listing.first_seen_at).getTime() >= cutoff || eventByListing.has(listing.id))
+      .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+    return {
+      search, matching, recent,
+      newCount: recent.filter((listing) => eventByListing.get(listing.id)?.event_type === "new" || new Date(listing.first_seen_at).getTime() >= cutoff).length,
+      reducedCount: recent.filter((listing) => eventByListing.get(listing.id)?.event_type === "price_reduced").length,
+    };
+  }), [savedSearches, listings, data.changes, data.generated_at]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const result = listings.filter((l) => {
@@ -424,6 +469,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         || (priceBand === "> €2,300/m²" && unitPrice != null && unitPrice > 2300)
         || (priceBand === "Price/area unresolved" && unitPrice == null);
       return matchesQuery
+        && (!activeSavedSearch || matchesSavedSearch(l, activeSavedSearch))
         && (source === "All sources" || l.source === source)
         && (location === "All locations" || l.normalized_location === location)
         && (status === "All statuses" || l.current_status === status)
@@ -442,7 +488,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       if (sort === "newest") return new Date(b.source_published_at ?? 0).getTime() - new Date(a.source_published_at ?? 0).getTime();
       return (b.total_score ?? 0) - (a.total_score ?? 0);
     });
-  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, photosOnly, favoritesOnly, qualityFilter, sort, data.generated_at]);
+  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, photosOnly, favoritesOnly, qualityFilter, sort, data.generated_at, activeSavedSearch]);
 
   const opportunities = useMemo(() => listings
     .filter((l) => l.clean_baseline_eligible && (l.calculated_price_per_m2 ?? Infinity) <= 2300)
@@ -724,6 +770,74 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     }
   };
 
+  const saveSearch = async () => {
+    if (!searchDraft.name.trim()) {
+      setSavedSearchNotice("Give this search a short name first.");
+      return;
+    }
+    setSavingSearch(true);
+    setSavedSearchNotice("");
+    const payload = {
+      name: searchDraft.name.trim(),
+      locations: searchDraft.location === "All locations" ? [] : [searchDraft.location],
+      sources: searchDraft.source === "All sources" ? [] : [searchDraft.source],
+      max_price: searchDraft.maxPrice.trim() ? Number(searchDraft.maxPrice) : null,
+      max_price_per_m2: searchDraft.maxPpsqm.trim() ? Number(searchDraft.maxPpsqm) : null,
+      min_bedrooms: searchDraft.minBedrooms.trim() ? Number(searchDraft.minBedrooms) : null,
+      parking_required: searchDraft.parking,
+      sea_view_required: searchDraft.seaView,
+      photos_required: searchDraft.photos,
+      digest_frequency: searchDraft.frequency,
+    };
+    try {
+      const response = await fetch("/api/saved-search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ search: payload }) });
+      const result = await response.json() as SavedSearch[] | { error?: string };
+      if (!response.ok || !Array.isArray(result) || !result[0]) throw new Error();
+      setData((current) => ({ ...current, saved_searches: [...(current.saved_searches ?? []), result[0]] }));
+      setSearchDraft(blankSearch);
+      setSavedSearchNotice("Search saved. Its digest is ready below.");
+    } catch {
+      setSavedSearchNotice("The search could not be saved. Please try again.");
+    } finally {
+      setSavingSearch(false);
+    }
+  };
+
+  const deleteSearch = async (searchId: string) => {
+    setSavedSearchNotice("");
+    try {
+      const response = await fetch("/api/saved-search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", search_id: searchId }) });
+      if (!response.ok) throw new Error();
+      setData((current) => ({ ...current, saved_searches: (current.saved_searches ?? []).filter((item) => item.id !== searchId) }));
+      if (activeSavedSearchId === searchId) setActiveSavedSearchId(null);
+      setSavedSearchNotice("Saved search removed.");
+    } catch {
+      setSavedSearchNotice("The saved search could not be removed.");
+    }
+  };
+
+  const applySavedSearch = (search: SavedSearch) => {
+    setActiveSavedSearchId(search.id);
+    setQuery(""); setSource("All sources"); setLocation("All locations"); setStatus("All statuses");
+    setPriceBand("All price bands"); setTargetOnly(false); setCleanOnly(false); setIssuesOnly(false);
+    setPhotosOnly(false); setFavoritesOnly(false); setQualityFilter("all"); setTab("listings");
+  };
+
+  const enrichPhotos = async () => {
+    setEnrichingPhotos(true);
+    setPhotoEnrichmentNotice("");
+    try {
+      const response = await fetch("/api/photo-enrichment", { method: "POST" });
+      const result = await response.json() as { attempted?: number; enriched?: number; photos_found?: number; error?: string };
+      if (!response.ok) throw new Error();
+      setPhotoEnrichmentNotice(`Checked ${result.attempted ?? 0} listings, enriched ${result.enriched ?? 0}, captured ${result.photos_found ?? 0} photo references. Reloading…`);
+      window.setTimeout(() => window.location.reload(), 1100);
+    } catch {
+      setPhotoEnrichmentNotice("Photo enrichment could not finish this batch. Existing photos remain unchanged.");
+      setEnrichingPhotos(false);
+    }
+  };
+
   const selectedComparison = comparisonId ? activeDuplicates.find((candidate) => candidate.id === comparisonId) : null;
   const comparisonA = selectedComparison ? listingById.get(selectedComparison.listing_id_a) : null;
   const comparisonB = selectedComparison ? listingById.get(selectedComparison.listing_id_b) : null;
@@ -753,6 +867,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><Icon>⌁</Icon><span>Market overview</span></button>
           <button className={tab === "sources" ? "active" : ""} onClick={() => setTab("sources")}><Icon>◫</Icon><span>Source health</span><em>{sourceHealth.length}</em></button>
           <button className={tab === "quality" ? "active" : ""} onClick={() => setTab("quality")}><Icon>✓</Icon><span>Data quality</span><em>{qualityProblemCount}</em></button>
+          <button className={tab === "digest" ? "active" : ""} onClick={() => setTab("digest")}><Icon>◉</Icon><span>Saved searches</span><em>{savedSearches.length}</em></button>
           <button className={tab === "deals" ? "active" : ""} onClick={() => setTab("deals")}><Icon>★</Icon><span>Deals workspace</span><em>{dealListings.length}</em></button>
           <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}><Icon>↕</Icon><span>Alerts & changes</span><em>{changesInWindow.length}</em></button>
           <button className={tab === "listings" ? "active" : ""} onClick={() => setTab("listings")}><Icon>⌂</Icon><span>Listings</span><em>{trackedCount}</em></button>
@@ -767,7 +882,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
       <main className="main">
         <header className="topbar">
-          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "sources" ? "Know what you can trust." : tab === "quality" ? "Make every record useful." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
+          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "sources" ? "Know what you can trust." : tab === "quality" ? "Make every record useful." : tab === "digest" ? "Let the market come to you." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
           <div className="scan-chip"><span>Latest source scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{sourceLabel(data.latest_scan.source)} · {data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
@@ -869,7 +984,42 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
               <button disabled={refreshingDuplicates || data.dataMode !== "live"} onClick={refreshDuplicates}>{refreshingDuplicates ? "Running strict check…" : "Run strict check now"}</button>
               {duplicateRefreshNotice && <small className="automation-notice">{duplicateRefreshNotice}</small>}
             </article>
+
+            <article className="panel automation-card photo-enrichment-card">
+              <div className="automation-icon">▧</div><span>PHOTO COVERAGE</span><h2>Targeted enrichment</h2><p>Checks a safe batch of photo-missing source pages, keeps only HTTPS listing images and never replaces a gallery that already works.</p>
+              <dl><div><dt>With photos</dt><dd>{qualityInventory.filter((listing) => listing.photo_urls?.length).length}</dd></div><div><dt>Still missing</dt><dd>{qualityInventory.filter((listing) => !listing.photo_urls?.length).length}</dd></div><div><dt>Batch size</dt><dd>16 listings</dd></div><div><dt>Priority</dt><dd>Realitica first</dd></div></dl>
+              <button disabled={enrichingPhotos || data.dataMode !== "live"} onClick={enrichPhotos}>{enrichingPhotos ? "Checking listing photos…" : "Enrich next photo batch"}</button>
+              {photoEnrichmentNotice && <small className="automation-notice">{photoEnrichmentNotice}</small>}
+            </article>
           </div>
+        </section>}
+
+        {tab === "digest" && <section className="digest-workspace">
+          <div className="workspace-head digest-head"><div><span>SAVED SEARCHES & DEAL DIGEST</span><h2>{savedSearches.length ? `${savedSearches.length} market watch${savedSearches.length === 1 ? "" : "es"}` : "Create your first market watch"}</h2><p>Save exact buying criteria once, then review only new matches and price reductions from the last day or week.</p></div></div>
+
+          <article className="panel search-builder">
+            <div className="panel-heading"><div><span>NEW MARKET WATCH</span><h2>Define what is worth your attention</h2></div><small>All fields combine together.</small></div>
+            <div className="search-builder-grid">
+              <label><span>Name</span><input value={searchDraft.name} onChange={(event) => setSearchDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Ilino under €2,000/m²" /></label>
+              <label><span>Location</span><select value={searchDraft.location} onChange={(event) => setSearchDraft((current) => ({ ...current, location: event.target.value }))}>{locations.map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label><span>Source</span><select value={searchDraft.source} onChange={(event) => setSearchDraft((current) => ({ ...current, source: event.target.value }))}>{sources.map((item) => <option key={item} value={item}>{item === "All sources" ? item : sourceLabel(item)}</option>)}</select></label>
+              <label><span>Maximum total price</span><input type="number" min="0" value={searchDraft.maxPrice} onChange={(event) => setSearchDraft((current) => ({ ...current, maxPrice: event.target.value }))} placeholder="120000" /></label>
+              <label><span>Maximum €/m²</span><input type="number" min="0" value={searchDraft.maxPpsqm} onChange={(event) => setSearchDraft((current) => ({ ...current, maxPpsqm: event.target.value }))} placeholder="2300" /></label>
+              <label><span>Minimum bedrooms</span><input type="number" min="0" value={searchDraft.minBedrooms} onChange={(event) => setSearchDraft((current) => ({ ...current, minBedrooms: event.target.value }))} placeholder="1" /></label>
+              <label><span>Digest frequency</span><select value={searchDraft.frequency} onChange={(event) => setSearchDraft((current) => ({ ...current, frequency: event.target.value as "daily" | "weekly" }))}><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label>
+              <div className="search-requirements"><label><input type="checkbox" checked={searchDraft.parking} onChange={(event) => setSearchDraft((current) => ({ ...current, parking: event.target.checked }))} /> Parking or garage</label><label><input type="checkbox" checked={searchDraft.seaView} onChange={(event) => setSearchDraft((current) => ({ ...current, seaView: event.target.checked }))} /> Sea view</label><label><input type="checkbox" checked={searchDraft.photos} onChange={(event) => setSearchDraft((current) => ({ ...current, photos: event.target.checked }))} /> Photos required</label></div>
+            </div>
+            <div className="search-builder-actions"><span>{savedSearchNotice}</span><button disabled={savingSearch || data.dataMode !== "live"} onClick={saveSearch}>{savingSearch ? "Saving…" : "Save search and build digest"}</button></div>
+          </article>
+
+          {!digestCards.length && <div className="deals-empty digest-empty"><strong>No saved searches yet.</strong><p>Try a focused watch such as “Ilino, under €2,000/m², with parking.” The digest will immediately use the scan history already stored.</p></div>}
+          {digestCards.length > 0 && <div className="digest-grid">{digestCards.map(({ search, matching, recent, newCount, reducedCount }) => <article className="digest-card" key={search.id}>
+            <div className="digest-card-head"><div><span>{search.digest_frequency.toUpperCase()} DIGEST</span><h3>{search.name}</h3></div><button aria-label={`Remove ${search.name}`} onClick={() => deleteSearch(search.id)}>×</button></div>
+            <div className="digest-stats"><div><strong>{recent.length}</strong><span>recent matches</span></div><div><strong>{newCount}</strong><span>new</span></div><div><strong>{reducedCount}</strong><span>reduced</span></div><div><strong>{matching.length}</strong><span>all matches</span></div></div>
+            <div className="digest-criteria">{search.locations.map((item) => <span key={item}>{item}</span>)}{search.sources.map((item) => <span key={item}>{sourceLabel(item)}</span>)}{search.max_price != null && <span>≤ {money(search.max_price)}</span>}{search.max_price_per_m2 != null && <span>≤ {ppsqm(search.max_price_per_m2)}</span>}{search.min_bedrooms != null && <span>{search.min_bedrooms}+ bed</span>}{search.parking_required && <span>Parking</span>}{search.sea_view_required && <span>Sea view</span>}{search.photos_required && <span>Photos</span>}</div>
+            <div className="digest-results">{recent.slice(0, 3).map((listing) => <button key={listing.id} onClick={() => openListing(listing)}>{listing.photo_urls?.[0] ? <ListingImage className="digest-thumb" src={listing.photo_urls[0]} alt="" /> : <span className="digest-thumb remote-image-fallback">⌂</span>}<div><strong>{listing.title || `Listing #${listing.source_listing_id}`}</strong><small>{listing.normalized_location || "Unresolved"} · {money(listing.price_value)} · {ppsqm(listing.calculated_price_per_m2)}</small></div></button>)}{!recent.length && <p>No new or reduced matches in this window. The full matching inventory is still available.</p>}</div>
+            <button className="digest-open" onClick={() => applySavedSearch(search)}>Explore all {matching.length} matches →</button>
+          </article>)}</div>}
         </section>}
 
         {tab === "deals" && <section className="deals-workspace">
@@ -943,6 +1093,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
         {tab === "listings" && <section className="listing-workspace">
           <div className="workspace-head"><div><span>LIVE INVENTORY</span><h2>{filtered.length} matching listings</h2></div><div className="workspace-actions"><p>Export respects every active filter.</p><button onClick={exportFilteredCsv}>⇩ Export {filtered.length} CSV</button></div></div>
+          {activeSavedSearch && <div className="quality-filter-banner saved-search-banner"><div><span>SAVED SEARCH</span><strong>{activeSavedSearch.name}</strong><small>{activeSavedSearch.digest_frequency} market watch</small></div><button onClick={() => setActiveSavedSearchId(null)}>Clear saved search ×</button></div>}
           {qualityFilter !== "all" && <div className="quality-filter-banner"><div><span>DATA QUALITY FILTER</span><strong>{QUALITY_LABELS[qualityFilter]}</strong><small>{source === "All sources" ? "Across all sources" : sourceLabel(source)}</small></div><button onClick={() => setQualityFilter("all")}>Clear quality filter ×</button></div>}
           <div className="filters">
             <label className="search"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search title, ID, agency…" /></label>

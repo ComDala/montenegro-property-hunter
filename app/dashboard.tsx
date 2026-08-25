@@ -134,6 +134,39 @@ type DuplicateGroup = {
   savings: number | null;
 };
 
+type QualityFilter =
+  | "all" | "missing_price" | "missing_area" | "missing_contact" | "missing_photo"
+  | "missing_description" | "low_confidence" | "suspicious_value" | "stale" | "duplicate";
+
+const QUALITY_LABELS: Record<QualityFilter, string> = {
+  all: "All quality issues",
+  missing_price: "Missing price",
+  missing_area: "Missing usable area",
+  missing_contact: "Missing public contact",
+  missing_photo: "Missing photos",
+  missing_description: "Missing description",
+  low_confidence: "Low-confidence extraction",
+  suspicious_value: "Suspicious €/m²",
+  stale: "Stale listing",
+  duplicate: "Possible duplicate",
+};
+
+function matchesQualityIssue(listing: Listing, filter: QualityFilter, generatedAt: string) {
+  if (filter === "all") return true;
+  if (filter === "missing_price") return listing.price_value == null;
+  if (filter === "missing_area") return listing.area_used_for_ppsqm_m2 == null;
+  if (filter === "missing_contact") {
+    const contact = contactParts(listing.public_contact);
+    return !contact.phones.length && !contact.emails.length;
+  }
+  if (filter === "missing_photo") return !listing.photo_urls?.length;
+  if (filter === "missing_description") return !listing.description_raw?.trim();
+  if (filter === "low_confidence") return listing.extraction_confidence === "low" || listing.extraction_confidence === "unknown";
+  if (filter === "suspicious_value") return listing.calculated_price_per_m2 != null && (listing.calculated_price_per_m2 < 1500 || listing.calculated_price_per_m2 > 6000);
+  if (filter === "stale") return new Date(generatedAt).getTime() - new Date(listing.last_seen_at).getTime() > 3 * 86_400_000;
+  return listing.possible_duplicate;
+}
+
 type WorkflowDraft = {
   purchase_price: string; transfer_tax_cost: string; legal_notary_cost: string;
   agency_fee_cost: string; renovation_budget: string; furnishing_budget: string;
@@ -197,7 +230,7 @@ function draftNumber(value: string) {
 
 export default function Dashboard({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [tab, setTab] = useState<"overview" | "sources" | "deals" | "changes" | "listings" | "review">("overview");
+  const [tab, setTab] = useState<"overview" | "sources" | "quality" | "deals" | "changes" | "listings" | "review">("overview");
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("All sources");
   const [location, setLocation] = useState("All locations");
@@ -208,6 +241,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [issuesOnly, setIssuesOnly] = useState(false);
   const [photosOnly, setPhotosOnly] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [qualityFilter, setQualityFilter] = useState<QualityFilter>("all");
   const [sort, setSort] = useState("ppsqm-asc");
   const [changeType, setChangeType] = useState("All changes");
   const [changeDays, setChangeDays] = useState(7);
@@ -231,6 +265,8 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [notice, setNotice] = useState("");
   const [exportNotice, setExportNotice] = useState("");
   const [copiedContact, setCopiedContact] = useState("");
+  const [refreshingDuplicates, setRefreshingDuplicates] = useState(false);
+  const [duplicateRefreshNotice, setDuplicateRefreshNotice] = useState("");
 
   const listings = data.listings;
   const validPrices = listings
@@ -242,6 +278,32 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const favoriteCount = listings.filter((l) => l.is_favorite).length;
   const targetCount = listings.filter((l) => (l.calculated_price_per_m2 ?? Infinity) <= 2300).length;
   const suspiciousCount = listings.filter((l) => (l.calculated_price_per_m2 ?? Infinity) < 1500).length;
+  const qualityInventory = useMemo(() => listings.filter((listing) => listing.current_status !== "Removed"), [listings]);
+  const qualityIssues = useMemo(() => ([
+    { key: "missing_price" as const, label: "Missing price", detail: "Cannot rank or compare", icon: "€", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "missing_price", data.generated_at)).length },
+    { key: "missing_area" as const, label: "Missing usable area", detail: "€/m² cannot be trusted", icon: "□", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "missing_area", data.generated_at)).length },
+    { key: "missing_contact" as const, label: "Missing contact", detail: "Needs source enrichment", icon: "☎", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "missing_contact", data.generated_at)).length },
+    { key: "missing_photo" as const, label: "Missing photos", detail: "No captured visual evidence", icon: "▧", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "missing_photo", data.generated_at)).length },
+    { key: "missing_description" as const, label: "Missing description", detail: "Weak feature extraction", icon: "≡", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "missing_description", data.generated_at)).length },
+    { key: "low_confidence" as const, label: "Low confidence", detail: "Manual verification recommended", icon: "!", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "low_confidence", data.generated_at)).length },
+    { key: "suspicious_value" as const, label: "Suspicious €/m²", detail: "Below €1,500 or above €6,000", icon: "↕", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "suspicious_value", data.generated_at)).length },
+    { key: "stale" as const, label: "Stale listing", detail: "Not observed for 3+ days", icon: "◷", count: qualityInventory.filter((listing) => matchesQualityIssue(listing, "stale", data.generated_at)).length },
+  ]), [qualityInventory, data.generated_at]);
+  const qualityProblemCount = useMemo(() => qualityInventory.filter((listing) => qualityIssues.some((issue) => matchesQualityIssue(listing, issue.key, data.generated_at))).length, [qualityInventory, qualityIssues, data.generated_at]);
+  const completenessScore = useMemo(() => {
+    if (!qualityInventory.length) return 0;
+    const complete = qualityInventory.reduce((sum, listing) => {
+      const contacts = contactParts(listing.public_contact);
+      return sum
+        + Number(listing.price_value != null)
+        + Number(listing.area_used_for_ppsqm_m2 != null)
+        + Number(Boolean(listing.normalized_location))
+        + Number(Boolean(contacts.phones.length || contacts.emails.length))
+        + Number(Boolean(listing.photo_urls?.length))
+        + Number(Boolean(listing.description_raw?.trim()));
+    }, 0);
+    return Math.round(complete / (qualityInventory.length * 6) * 100);
+  }, [qualityInventory]);
 
   const sources = useMemo(() => ["All sources", ...Array.from(new Set(listings.map((l) => l.source).filter(Boolean))).sort()], [listings]);
   const locations = useMemo(() => ["All locations", ...Array.from(new Set(listings.map((l) => l.normalized_location).filter(Boolean) as string[])).sort()], [listings]);
@@ -326,6 +388,21 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       targets: inventory.filter((listing) => (listing.calculated_price_per_m2 ?? Infinity) <= 2300).length,
     };
   }).sort((a, b) => a.ageDays - b.ageDays), [sources, listings, data.scan_history, data.generated_at]);
+  const sourceQuality = useMemo(() => sources.slice(1).map((sourceName) => {
+    const inventory = qualityInventory.filter((listing) => listing.source === sourceName);
+    const count = (predicate: (listing: Listing) => boolean) => inventory.filter(predicate).length;
+    const contacts = count((listing) => { const parts = contactParts(listing.public_contact); return Boolean(parts.phones.length || parts.emails.length); });
+    const completed = count((listing) => listing.price_value != null) + count((listing) => listing.area_used_for_ppsqm_m2 != null)
+      + count((listing) => Boolean(listing.normalized_location)) + contacts + count((listing) => Boolean(listing.photo_urls?.length))
+      + count((listing) => Boolean(listing.description_raw?.trim()));
+    return {
+      source: sourceName, total: inventory.length,
+      price: count((listing) => listing.price_value != null), area: count((listing) => listing.area_used_for_ppsqm_m2 != null),
+      location: count((listing) => Boolean(listing.normalized_location)), contact: contacts,
+      photo: count((listing) => Boolean(listing.photo_urls?.length)), description: count((listing) => Boolean(listing.description_raw?.trim())),
+      score: inventory.length ? Math.round(completed / (inventory.length * 6) * 100) : 0,
+    };
+  }).sort((a, b) => a.score - b.score), [sources, qualityInventory]);
 
   const changesInWindow = useMemo(() => {
     const cutoff = new Date(data.generated_at).getTime() - changeDays * 86_400_000;
@@ -355,7 +432,8 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         && (!cleanOnly || l.clean_baseline_eligible)
         && (!issuesOnly || l.ambiguity_flags?.length > 0 || l.possible_duplicate || l.extraction_confidence === "low")
         && (!photosOnly || Boolean(l.photo_urls?.length))
-        && (!favoritesOnly || l.is_favorite);
+        && (!favoritesOnly || l.is_favorite)
+        && (qualityFilter === "all" || matchesQualityIssue(l, qualityFilter, data.generated_at));
     });
     return result.sort((a, b) => {
       if (sort === "ppsqm-asc") return (a.calculated_price_per_m2 ?? Infinity) - (b.calculated_price_per_m2 ?? Infinity);
@@ -364,7 +442,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       if (sort === "newest") return new Date(b.source_published_at ?? 0).getTime() - new Date(a.source_published_at ?? 0).getTime();
       return (b.total_score ?? 0) - (a.total_score ?? 0);
     });
-  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, photosOnly, favoritesOnly, sort]);
+  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, photosOnly, favoritesOnly, qualityFilter, sort, data.generated_at]);
 
   const opportunities = useMemo(() => listings
     .filter((l) => l.clean_baseline_eligible && (l.calculated_price_per_m2 ?? Infinity) <= 2300)
@@ -616,6 +694,36 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     }
   };
 
+  const openQualityIssue = (filter: QualityFilter, sourceName = "All sources") => {
+    setQuery("");
+    setSource(sourceName);
+    setLocation("All locations");
+    setStatus("All statuses");
+    setPriceBand("All price bands");
+    setTargetOnly(false);
+    setCleanOnly(false);
+    setIssuesOnly(false);
+    setPhotosOnly(false);
+    setFavoritesOnly(false);
+    setQualityFilter(filter);
+    setTab("listings");
+  };
+
+  const refreshDuplicates = async () => {
+    setRefreshingDuplicates(true);
+    setDuplicateRefreshNotice("");
+    try {
+      const response = await fetch("/api/duplicate-refresh", { method: "POST" });
+      const payload = await response.json() as { status?: string; candidates_considered?: number; candidates_inserted?: number; candidates_updated?: number; error?: string };
+      if (!response.ok || payload.status === "failed") throw new Error(payload.error || "Refresh failed");
+      setDuplicateRefreshNotice(`Complete: ${payload.candidates_inserted ?? 0} new and ${payload.candidates_updated ?? 0} refreshed candidates. Reloading…`);
+      window.setTimeout(() => window.location.reload(), 900);
+    } catch {
+      setDuplicateRefreshNotice("The strict duplicate check could not finish. The scheduled processor will retry safely.");
+      setRefreshingDuplicates(false);
+    }
+  };
+
   const selectedComparison = comparisonId ? activeDuplicates.find((candidate) => candidate.id === comparisonId) : null;
   const comparisonA = selectedComparison ? listingById.get(selectedComparison.listing_id_a) : null;
   const comparisonB = selectedComparison ? listingById.get(selectedComparison.listing_id_b) : null;
@@ -644,6 +752,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         <nav>
           <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><Icon>⌁</Icon><span>Market overview</span></button>
           <button className={tab === "sources" ? "active" : ""} onClick={() => setTab("sources")}><Icon>◫</Icon><span>Source health</span><em>{sourceHealth.length}</em></button>
+          <button className={tab === "quality" ? "active" : ""} onClick={() => setTab("quality")}><Icon>✓</Icon><span>Data quality</span><em>{qualityProblemCount}</em></button>
           <button className={tab === "deals" ? "active" : ""} onClick={() => setTab("deals")}><Icon>★</Icon><span>Deals workspace</span><em>{dealListings.length}</em></button>
           <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}><Icon>↕</Icon><span>Alerts & changes</span><em>{changesInWindow.length}</em></button>
           <button className={tab === "listings" ? "active" : ""} onClick={() => setTab("listings")}><Icon>⌂</Icon><span>Listings</span><em>{trackedCount}</em></button>
@@ -658,7 +767,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
       <main className="main">
         <header className="topbar">
-          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "sources" ? "Know what you can trust." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
+          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "sources" ? "Know what you can trust." : tab === "quality" ? "Make every record useful." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
           <div className="scan-chip"><span>Latest source scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{sourceLabel(data.latest_scan.source)} · {data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
@@ -723,6 +832,44 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
             })}
           </div>
           <div className="source-legend"><div><span className="freshness current">Current</span><p>Scanned within roughly 36 hours</p></div><div><span className="freshness recent">Recent</span><p>Useful recent snapshot, not daily</p></div><div><span className="freshness baseline">Baseline</span><p>Preserved inventory awaiting its next refresh</p></div></div>
+        </section>}
+
+        {tab === "quality" && <section className="quality-workspace">
+          <div className="quality-hero">
+            <div className="quality-score-ring" style={{ background: `conic-gradient(#139477 ${completenessScore * 3.6}deg, #dfe7e1 0deg)` }}><div><strong>{completenessScore}%</strong><span>complete</span></div></div>
+            <div><span>ACTIVE INVENTORY QUALITY</span><h2>{qualityInventory.length} listings measured across six essential fields</h2><p>Price, usable area, normalized location, public contact, photos and description. Removed listings are preserved but excluded from this working score.</p></div>
+            <button onClick={() => openQualityIssue("all")}>Explore active inventory →</button>
+          </div>
+
+          <div className="quality-issue-grid">
+            {qualityIssues.map((issue) => <button key={issue.key} className={issue.count ? "quality-issue-card has-issues" : "quality-issue-card clean"} onClick={() => openQualityIssue(issue.key)}>
+              <span>{issue.icon}</span><div><strong>{issue.count}</strong><h3>{issue.label}</h3><p>{issue.detail}</p></div><i>View →</i>
+            </button>)}
+          </div>
+
+          <div className="quality-lower-grid">
+            <article className="panel quality-matrix">
+              <div className="panel-heading"><div><span>COMPLETENESS BY SOURCE</span><h2>Where enrichment has the greatest impact</h2></div><small>Click an incomplete field to inspect its listings.</small></div>
+              <div className="quality-table-wrap"><table><thead><tr><th>Source</th><th>Price</th><th>Area</th><th>Location</th><th>Contact</th><th>Photos</th><th>Description</th><th>Score</th></tr></thead><tbody>
+                {sourceQuality.map((item) => <tr key={item.source}><td><span className={`source-pill source-${item.source}`}>{sourceLabel(item.source)}</span><small>{item.total} active</small></td>
+                  {([['price', 'missing_price'], ['area', 'missing_area'], ['location', 'all'], ['contact', 'missing_contact'], ['photo', 'missing_photo'], ['description', 'missing_description']] as const).map(([field, filter]) => {
+                    const complete = item[field];
+                    const missing = item.total - complete;
+                    return <td key={field}><button disabled={!missing || filter === "all"} className={missing ? "incomplete" : "complete"} onClick={() => openQualityIssue(filter, item.source)}><strong>{complete}/{item.total}</strong><span>{missing ? `${missing} missing` : "Complete"}</span></button></td>;
+                  })}
+                  <td><strong className={item.score >= 80 ? "quality-good" : item.score >= 60 ? "quality-warm" : "quality-low"}>{item.score}%</strong></td>
+                </tr>)}
+              </tbody></table></div>
+            </article>
+
+            <article className="panel automation-card">
+              <div className="automation-icon">↻</div><span>POST-SCAN AUTOMATION</span><h2>Strict duplicate refresh</h2><p>Runs every 15 minutes, but only when new observations exist. It adds review candidates, preserves your decisions and never merges listings.</p>
+              <dl><div><dt>Last completed</dt><dd>{shortDate(data.duplicate_refresh?.finished_at)}</dd></div><div><dt>Trigger</dt><dd>{data.duplicate_refresh?.trigger_source ?? "Awaiting first run"}</dd></div><div><dt>Considered</dt><dd>{data.duplicate_refresh?.candidates_considered ?? "—"}</dd></div><div><dt>New / refreshed</dt><dd>{data.duplicate_refresh ? `${data.duplicate_refresh.candidates_inserted ?? 0} / ${data.duplicate_refresh.candidates_updated ?? 0}` : "—"}</dd></div></dl>
+              {data.duplicate_refresh?.error_summary && <div className="automation-warning">The last scheduled run reported a problem and will retry.</div>}
+              <button disabled={refreshingDuplicates || data.dataMode !== "live"} onClick={refreshDuplicates}>{refreshingDuplicates ? "Running strict check…" : "Run strict check now"}</button>
+              {duplicateRefreshNotice && <small className="automation-notice">{duplicateRefreshNotice}</small>}
+            </article>
+          </div>
         </section>}
 
         {tab === "deals" && <section className="deals-workspace">
@@ -796,6 +943,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
         {tab === "listings" && <section className="listing-workspace">
           <div className="workspace-head"><div><span>LIVE INVENTORY</span><h2>{filtered.length} matching listings</h2></div><div className="workspace-actions"><p>Export respects every active filter.</p><button onClick={exportFilteredCsv}>⇩ Export {filtered.length} CSV</button></div></div>
+          {qualityFilter !== "all" && <div className="quality-filter-banner"><div><span>DATA QUALITY FILTER</span><strong>{QUALITY_LABELS[qualityFilter]}</strong><small>{source === "All sources" ? "Across all sources" : sourceLabel(source)}</small></div><button onClick={() => setQualityFilter("all")}>Clear quality filter ×</button></div>}
           <div className="filters">
             <label className="search"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search title, ID, agency…" /></label>
             <select value={source} onChange={(e) => setSource(e.target.value)}>{sources.map((v) => <option key={v} value={v}>{v === "All sources" ? v : sourceLabel(v)}</option>)}</select>

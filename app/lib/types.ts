@@ -93,8 +93,16 @@ export type Scan = {
   pages_successful?: number; pages_failed?: number; authenticated?: boolean;
 };
 
+export type DuplicateRefresh = {
+  id?: number; trigger_source?: "scheduled" | "manual" | "initial";
+  started_at?: string; finished_at?: string | null; latest_observation_at?: string | null;
+  candidates_considered?: number; candidates_inserted?: number; candidates_updated?: number;
+  error_summary?: string | null;
+};
+
 export type DashboardData = {
   generated_at: string; latest_scan: Scan; listings: Listing[];
   scan_history: Scan[]; changes: ChangeEvent[]; duplicates: DuplicateCandidate[];
+  duplicate_refresh?: DuplicateRefresh;
   dataMode?: "live" | "preview";
 };

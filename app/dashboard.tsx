@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import type { ChangeEvent, DashboardData, DuplicateReviewStatus, Listing, ListingWorkflow, Status } from "./lib/types";
+import { useEffect, useMemo, useState } from "react";
+import type { ChangeEvent, DashboardData, DuplicateCandidate, DuplicateReviewStatus, Listing, ListingWorkflow, Status } from "./lib/types";
 
 const ALL_STATUSES: Status[] = [
   "New", "Review", "Watch", "Hot Deal", "Contact Agent", "Contacted",
@@ -116,11 +116,23 @@ function Icon({ children }: { children: React.ReactNode }) {
 
 function ListingImage({ src, alt, className, eager = false }: { src: string; alt: string; className: string; eager?: boolean }) {
   const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
   if (failed) return <span className={`${className} remote-image-fallback`} aria-label="Image unavailable">⌂</span>;
   // Remote listing hosts vary by source, so a native lazy image is the safe cross-source loader here.
   // eslint-disable-next-line @next/next/no-img-element
-  return <img className={className} src={src} alt={alt} loading={eager ? "eager" : "lazy"} decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+  return <img className={className} src={src} alt={alt} loading={eager ? "eager" : "lazy"} fetchPriority={eager ? "high" : "auto"} decoding="async" draggable={false} referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
 }
+
+type DuplicateGroup = {
+  id: string;
+  listingIds: string[];
+  candidates: DuplicateCandidate[];
+  strongest: DuplicateCandidate;
+  sources: string[];
+  minPrice: number | null;
+  maxPrice: number | null;
+  savings: number | null;
+};
 
 type WorkflowDraft = {
   purchase_price: string; transfer_tax_cost: string; legal_notary_cost: string;
@@ -235,6 +247,59 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const locations = useMemo(() => ["All locations", ...Array.from(new Set(listings.map((l) => l.normalized_location).filter(Boolean) as string[])).sort()], [listings]);
   const activeDuplicates = useMemo(() => data.duplicates.filter((d) => d.review_status !== "Not Duplicate"), [data.duplicates]);
   const listingById = useMemo(() => new Map(listings.map((listing) => [listing.id, listing])), [listings]);
+  const crossSourceDuplicates = useMemo(() => activeDuplicates.filter((candidate) => {
+    const a = listingById.get(candidate.listing_id_a);
+    const b = listingById.get(candidate.listing_id_b);
+    return Boolean(a && b && a.source !== b.source);
+  }).sort((a, b) => (b.confidence_score ?? 0) - (a.confidence_score ?? 0)), [activeDuplicates, listingById]);
+  const duplicateGroups = useMemo<DuplicateGroup[]>(() => {
+    // Only stronger cross-source relationships form groups. Lower-confidence pairs remain
+    // available in the review queue without creating misleading transitive mega-groups.
+    const groupEdges = crossSourceDuplicates.filter((candidate) =>
+      (candidate.confidence_score ?? 0) >= 0.8
+      || candidate.review_status === "Confirmed Duplicate"
+      || candidate.review_status === "Same Project"
+    );
+    const adjacency = new Map<string, Set<string>>();
+    groupEdges.forEach((candidate) => {
+      if (!adjacency.has(candidate.listing_id_a)) adjacency.set(candidate.listing_id_a, new Set());
+      if (!adjacency.has(candidate.listing_id_b)) adjacency.set(candidate.listing_id_b, new Set());
+      adjacency.get(candidate.listing_id_a)!.add(candidate.listing_id_b);
+      adjacency.get(candidate.listing_id_b)!.add(candidate.listing_id_a);
+    });
+
+    const visited = new Set<string>();
+    const groups: DuplicateGroup[] = [];
+    adjacency.forEach((_, start) => {
+      if (visited.has(start)) return;
+      const stack = [start];
+      const component: string[] = [];
+      while (stack.length) {
+        const current = stack.pop()!;
+        if (visited.has(current)) continue;
+        visited.add(current);
+        component.push(current);
+        adjacency.get(current)?.forEach((neighbor) => { if (!visited.has(neighbor)) stack.push(neighbor); });
+      }
+      const componentSet = new Set(component);
+      const candidates = groupEdges.filter((candidate) => componentSet.has(candidate.listing_id_a) && componentSet.has(candidate.listing_id_b));
+      const componentListings = component.map((id) => listingById.get(id)).filter((listing): listing is Listing => Boolean(listing));
+      const sources = Array.from(new Set(componentListings.map((listing) => listing.source))).sort();
+      if (componentListings.length < 2 || sources.length < 2 || !candidates.length) return;
+      const prices = componentListings.map((listing) => listing.price_value).filter((price): price is number => price != null);
+      const minPrice = prices.length ? Math.min(...prices) : null;
+      const maxPrice = prices.length ? Math.max(...prices) : null;
+      groups.push({
+        id: [...component].sort().join("-"), listingIds: component,
+        candidates: [...candidates].sort((a, b) => (b.confidence_score ?? 0) - (a.confidence_score ?? 0)),
+        strongest: [...candidates].sort((a, b) => (b.confidence_score ?? 0) - (a.confidence_score ?? 0))[0],
+        sources, minPrice, maxPrice,
+        savings: minPrice != null && maxPrice != null && maxPrice > minPrice ? maxPrice - minPrice : null,
+      });
+    });
+    return groups.sort((a, b) => (b.savings ?? 0) - (a.savings ?? 0) || (b.strongest.confidence_score ?? 0) - (a.strongest.confidence_score ?? 0));
+  }, [crossSourceDuplicates, listingById]);
+  const groupedListingCount = useMemo(() => new Set(duplicateGroups.flatMap((group) => group.listingIds)).size, [duplicateGroups]);
   const dealListings = useMemo(() => listings.filter((listing) =>
     listing.is_favorite || ["Hot Deal", "Contact Agent", "Contacted", "Viewing", "Negotiating"].includes(listing.current_status)
   ).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0)), [listings]);
@@ -755,14 +820,37 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           </tbody></table>{!filtered.length && <div className="empty">No listings match these filters.</div>}</div>
         </section>}
 
-        {tab === "review" && <section className="review-grid">
+        {tab === "review" && <section className="review-workspace">
+          <article className="panel duplicate-groups">
+            <div className="panel-heading"><div><span>CROSS-SOURCE PROPERTY GROUPS</span><h2>{duplicateGroups.length} likely property groups</h2><p>{groupedListingCount} advertisements linked across {crossSourceDuplicates.length} active cross-source relationships. Groups use stronger matches; every source listing stays separate.</p></div><div className="duplicate-group-stats"><span><strong>{crossSourceDuplicates.length}</strong> cross-source pairs</span><span><strong>{activeDuplicates.length}</strong> all active pairs</span></div></div>
+            <div className="duplicate-group-grid">
+              {duplicateGroups.slice(0, 9).map((group) => {
+                const groupListings = group.listingIds.map((id) => listingById.get(id)).filter((listing): listing is Listing => Boolean(listing));
+                const cheapest = [...groupListings].sort((a, b) => (a.price_value ?? Infinity) - (b.price_value ?? Infinity))[0];
+                return <article className="duplicate-group-card" key={group.id}>
+                  <div className="duplicate-photo-strip">{groupListings.slice(0, 3).map((listing) => listing.photo_urls?.[0]
+                    ? <ListingImage key={listing.id} className="duplicate-group-photo" src={listing.photo_urls[0]} alt={`${sourceLabel(listing.source)} offer`} />
+                    : <span key={listing.id} className="duplicate-group-photo remote-image-fallback" aria-hidden="true">⌂</span>)}</div>
+                  <div className="duplicate-group-body"><div className="duplicate-group-source-row">{group.sources.map((item) => <span className={`source-pill source-${item}`} key={item}>{sourceLabel(item)}</span>)}</div>
+                    <h3>{cheapest?.title || "Likely matching property"}</h3><p>{groupListings.length} advertisements · strongest match {Math.round((group.strongest.confidence_score ?? 0) * 100)}%</p>
+                    <div className="duplicate-price-row"><span><small>LOWEST ASK</small><strong>{money(group.minPrice)}</strong></span><span><small>PRICE SPREAD</small><strong className={group.savings ? "positive" : ""}>{group.savings ? money(group.savings) : "Same price"}</strong></span></div>
+                    <button onClick={() => openDuplicateComparison(group.strongest.id)}>Review strongest relationship →</button>
+                  </div>
+                </article>;
+              })}
+              {!duplicateGroups.length && <div className="empty">No strong cross-source groups are waiting for review.</div>}
+            </div>
+          </article>
+          <div className="review-grid">
           <article className="panel review-list"><div className="panel-heading"><div><span>ATTENTION NEEDED</span><h2>{reviewCount} listings in review</h2></div></div>
             {listings.filter((l) => l.current_status === "Review").slice(0, 12).map((listing) => <button key={listing.id} onClick={() => openListing(listing)}><span className={`review-dot ${listing.extraction_confidence}`} /><div><strong>{listing.title}</strong><small>{sourceLabel(listing.source)} #{listing.source_listing_id} · {listing.normalized_location}</small></div><b>{ppsqm(listing.calculated_price_per_m2)}</b></button>)}
             {reviewCount > 12 && <button className="show-all" onClick={() => { setStatus("Review"); setTab("listings"); }}>Show all {reviewCount} review listings →</button>}
           </article>
-          <article className="panel duplicates"><div className="panel-heading"><div><span>DUPLICATE CANDIDATES</span><h2>{activeDuplicates.length} active relationships</h2></div></div>
-            {activeDuplicates.slice(0, 8).map((d) => <button className="duplicate-row" key={d.id} onClick={() => openDuplicateComparison(d.id)}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>{sourceLabel(d.source_a)} #{d.source_listing_id_a} ↔ {sourceLabel(d.source_b)} #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>{d.review_status === "Pending" ? "Review" : d.review_status} →</i></button>)}
+          <article className="panel duplicates"><div className="panel-heading"><div><span>CROSS-SOURCE REVIEW QUEUE</span><h2>{crossSourceDuplicates.length} active relationships</h2></div></div>
+            {crossSourceDuplicates.slice(0, 10).map((d) => <button className="duplicate-row" key={d.id} onClick={() => openDuplicateComparison(d.id)}><span>{Math.round((d.confidence_score ?? 0) * 100)}%</span><div><strong>{sourceLabel(d.source_a)} #{d.source_listing_id_a} ↔ {sourceLabel(d.source_b)} #{d.source_listing_id_b}</strong><small>{d.reason}</small></div><i>{d.review_status === "Pending" ? "Review" : d.review_status} →</i></button>)}
+            {!crossSourceDuplicates.length && <div className="empty">No cross-source relationships need review.</div>}
           </article>
+          </div>
         </section>}
       </main>
 
@@ -836,9 +924,9 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         <div className="compare-head"><div><span>DUPLICATE EVIDENCE</span><h2>Are these the same property?</h2><p>{selectedComparison.reason}</p></div><button aria-label="Close comparison" onClick={() => setComparisonId(null)}>×</button></div>
         <div className="compare-confidence"><strong>{Math.round((selectedComparison.confidence_score ?? 0) * 100)}% match</strong><span>{selectedComparison.review_status}</span></div>
         <div className="compare-grid">
-          {[comparisonA, comparisonB].map((listing) => <article key={listing.id}><span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span><h3>{listing.title}</h3><small>#{listing.source_listing_id} · {listing.normalized_location}</small><dl><div><dt>Price</dt><dd>{money(listing.price_value)}</dd></div><div><dt>€/m²</dt><dd>{ppsqm(listing.calculated_price_per_m2)}</dd></div><div><dt>Area</dt><dd>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</dd></div><div><dt>Bedrooms</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Floor</dt><dd>{listing.floor ?? "—"}</dd></div><div><dt>Agency</dt><dd>{listing.agency_name ?? listing.seller_type}</dd></div></dl><button onClick={() => { setComparisonId(null); openListing(listing); }}>Inspect this offer</button></article>)}
+          {[comparisonA, comparisonB].map((listing) => <article key={listing.id}>{listing.photo_urls?.[0] ? <ListingImage className="compare-photo" src={listing.photo_urls[0]} alt={`${sourceLabel(listing.source)} duplicate evidence`} /> : <span className="compare-photo remote-image-fallback" aria-label="No captured photo">⌂</span>}<span className={`source-pill source-${listing.source}`}>{sourceLabel(listing.source)}</span><h3>{listing.title}</h3><small>#{listing.source_listing_id} · {listing.normalized_location}</small><dl><div><dt>Price</dt><dd>{money(listing.price_value)}</dd></div><div><dt>€/m²</dt><dd>{ppsqm(listing.calculated_price_per_m2)}</dd></div><div><dt>Area</dt><dd>{listing.area_used_for_ppsqm_m2 ? `${listing.area_used_for_ppsqm_m2} m²` : "—"}</dd></div><div><dt>Bedrooms</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Floor</dt><dd>{listing.floor ?? "—"}</dd></div><div><dt>Agency</dt><dd>{listing.agency_name ?? listing.seller_type}</dd></div></dl><button onClick={() => { setComparisonId(null); openListing(listing); }}>Inspect this offer</button></article>)}
         </div>
-        <div className="evidence-row"><span className={selectedComparison.same_area ? "yes" : ""}>Area {selectedComparison.same_area ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_location ? "yes" : ""}>Location {selectedComparison.same_location ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_bedrooms ? "yes" : ""}>Bedrooms {selectedComparison.same_bedrooms ? "match" : "unconfirmed"}</span><span className={selectedComparison.similar_price ? "yes" : ""}>Price {selectedComparison.similar_price ? "similar" : "differs"}</span></div>
+        <div className="evidence-row"><span className={selectedComparison.same_area ? "yes" : ""}>Area {selectedComparison.same_area ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_location ? "yes" : ""}>Location {selectedComparison.same_location ? "matches" : "unconfirmed"}</span><span className={selectedComparison.same_bedrooms ? "yes" : ""}>Bedrooms {selectedComparison.same_bedrooms ? "match" : "unconfirmed"}</span><span className={selectedComparison.similar_price ? "yes" : ""}>Price {selectedComparison.similar_price ? "similar" : "differs"}</span><span className={selectedComparison.same_phone ? "yes" : ""}>Contact {selectedComparison.same_phone ? "matches" : "unconfirmed"}</span><span className={selectedComparison.photo_similarity != null && selectedComparison.photo_similarity >= 0.7 ? "yes" : ""}>Photos {selectedComparison.photo_similarity == null ? "manual check" : `${Math.round(selectedComparison.photo_similarity * 100)}% similar`}</span><span className={selectedComparison.description_similarity != null && selectedComparison.description_similarity >= 0.7 ? "yes" : ""}>Description {selectedComparison.description_similarity == null ? "unscored" : `${Math.round(selectedComparison.description_similarity * 100)}% similar`}</span></div>
         <div className="duplicate-decision"><div><span>YOUR DECISION</span><h3>Classify this relationship</h3><p>The candidate evidence remains stored even when you decide these are not duplicates.</p></div><div className="decision-options">
           {(["Confirmed Duplicate", "Same Project", "Not Duplicate", "Needs Review"] as DuplicateReviewStatus[]).map((value) => <button className={duplicateReviewDraft === value ? "active" : ""} key={value} onClick={() => setDuplicateReviewDraft(value)}>{value}</button>)}
         </div><textarea value={duplicateReviewNote} maxLength={1000} onChange={(event) => setDuplicateReviewNote(event.target.value)} placeholder="Optional review note—for example, same development but different floor…" /><div className="decision-save"><span>{duplicateReviewNotice}</span><button disabled={savingDuplicateReview || data.dataMode !== "live"} onClick={saveDuplicateReview}>{savingDuplicateReview ? "Saving…" : "Save decision"}</button></div></div>

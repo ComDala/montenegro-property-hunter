@@ -90,7 +90,10 @@ export type DuplicateCandidate = {
 
 export type Scan = {
   id?: string; source?: string; started_at?: string; listings_discovered?: number;
-  pages_successful?: number; pages_failed?: number; authenticated?: boolean;
+  finished_at?: string | null; pages_attempted?: number; pages_successful?: number;
+  pages_failed?: number; authenticated?: boolean; captcha_detected?: boolean;
+  throttling_detected?: boolean; blocking_detected?: boolean; logout_detected?: boolean;
+  error_summary?: string | null;
 };
 
 export type DuplicateRefresh = {

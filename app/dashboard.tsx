@@ -199,6 +199,79 @@ function matchesSavedSearch(listing: Listing, search: SavedSearch) {
     && (!search.photos_required || Boolean(listing.photo_urls?.length));
 }
 
+type NaturalCriteria = {
+  locations: string[]; sources: string[]; maxPrice: number | null; maxPpsqm: number | null;
+  minBedrooms: number | null; parking: boolean; seaView: boolean; newConstruction: boolean;
+  ownerOnly: boolean; reducedOnly: boolean; newOnly: boolean; cleanOnly: boolean;
+  photos: boolean; furnished: boolean; elevator: boolean;
+};
+
+const emptyNaturalCriteria: NaturalCriteria = {
+  locations: [], sources: [], maxPrice: null, maxPpsqm: null, minBedrooms: null,
+  parking: false, seaView: false, newConstruction: false, ownerOnly: false,
+  reducedOnly: false, newOnly: false, cleanOnly: false, photos: false,
+  furnished: false, elevator: false,
+};
+
+function parsedAmount(raw: string, suffix?: string) {
+  const value = Number(raw.replace(/[.,](?=\d{3}(?:\D|$))/g, "").replace(",", "."));
+  if (!Number.isFinite(value)) return null;
+  return suffix?.toLowerCase() === "k" ? value * 1000 : value;
+}
+
+function parseNaturalSearch(text: string, knownLocations: string[], knownSources: string[]) {
+  const normalized = text.toLowerCase().replace(/€/g, " euro ").replace(/²/g, "2");
+  const criteria: NaturalCriteria = { ...emptyNaturalCriteria };
+  criteria.locations = knownLocations.filter((item) => item !== "All locations" && normalized.includes(item.toLowerCase()));
+  criteria.sources = knownSources.filter((item) => item !== "All sources" && normalized.includes(sourceLabel(item).toLowerCase()));
+  criteria.parking = /\bparking|garage|garaž|garaz/.test(normalized);
+  criteria.seaView = /sea[ -]?view|pogled.{0,8}more/.test(normalized);
+  criteria.newConstruction = /new[ -]?(build|construction)|novograd/.test(normalized);
+  criteria.ownerOnly = /\bowner|direct.{0,8}owner|vlasnik/.test(normalized);
+  criteria.reducedOnly = /price.{0,8}(reduc|drop)|reduc(ed|tion)|sniž|sniz/.test(normalized);
+  criteria.newOnly = /new listing|new today|fresh listing|today'?s new/.test(normalized);
+  criteria.cleanOnly = /clean only|exclude.{0,12}suspicious|without.{0,12}suspicious|trusted only/.test(normalized);
+  criteria.photos = /with photos|photos required|has photos/.test(normalized);
+  criteria.furnished = /furnished|namješten|namjesten/.test(normalized);
+  criteria.elevator = /elevator|lift|liftom/.test(normalized);
+
+  const bedrooms = normalized.match(/(?:at least|min(?:imum)?\s*)?(\d+)\s*(?:\+\s*)?(?:bed|bedroom|spava)/);
+  if (bedrooms) criteria.minBedrooms = Number(bedrooms[1]);
+  const ppsqm = normalized.match(/(?:under|below|max(?:imum)?|up to|less than|do)\s*(?:euro\s*)?([\d.,]+)\s*(k)?\s*(?:euro\s*)?(?:\/\s*m2|per\s*m2|m2)/);
+  if (ppsqm) criteria.maxPpsqm = parsedAmount(ppsqm[1], ppsqm[2]);
+  const totalPrice = normalized.match(/(?:under|below|max(?:imum)?|up to|less than|do)\s*(?:euro\s*)?([\d.,]+)\s*(k)?(?:\s*euro)?(?!\s*(?:\/\s*m2|per\s*m2|m2))/);
+  if (totalPrice) {
+    const amount = parsedAmount(totalPrice[1], totalPrice[2]);
+    if (amount != null && amount > 10_000) criteria.maxPrice = amount;
+  }
+  return criteria;
+}
+
+function naturalCriteriaLabels(criteria: NaturalCriteria) {
+  return [
+    ...criteria.locations, ...criteria.sources.map(sourceLabel),
+    criteria.maxPrice != null ? `≤ ${money(criteria.maxPrice)}` : null,
+    criteria.maxPpsqm != null ? `≤ ${ppsqm(criteria.maxPpsqm)}` : null,
+    criteria.minBedrooms != null ? `${criteria.minBedrooms}+ bedrooms` : null,
+    criteria.parking ? "Parking or garage" : null, criteria.seaView ? "Sea view" : null,
+    criteria.newConstruction ? "New construction" : null, criteria.ownerOnly ? "Owner only" : null,
+    criteria.reducedOnly ? "Price reduced" : null, criteria.newOnly ? "New listings" : null,
+    criteria.cleanOnly ? "Exclude suspicious" : null, criteria.photos ? "Photos" : null,
+    criteria.furnished ? "Furnished" : null, criteria.elevator ? "Elevator" : null,
+  ].filter((item): item is string => Boolean(item));
+}
+
+function savedSearchReasons(listing: Listing, search: SavedSearch) {
+  return [
+    search.locations.length && listing.normalized_location ? listing.normalized_location : null,
+    search.max_price != null && listing.price_value != null ? `${money(search.max_price - listing.price_value)} below budget` : null,
+    search.max_price_per_m2 != null && listing.calculated_price_per_m2 != null ? `${number.format(search.max_price_per_m2 - listing.calculated_price_per_m2)} €/m² headroom` : null,
+    search.parking_required && (listing.parking || listing.garage) ? "Parking confirmed" : null,
+    search.sea_view_required && listing.sea_view ? "Sea view" : null,
+    search.photos_required && listing.photo_urls?.length ? `${listing.photo_urls.length} photos` : null,
+  ].filter((item): item is string => Boolean(item)).slice(0, 3);
+}
+
 const blankWorkflow: WorkflowDraft = {
   purchase_price: "", transfer_tax_cost: "", legal_notary_cost: "",
   agency_fee_cost: "", renovation_budget: "", furnishing_budget: "",
@@ -252,7 +325,7 @@ function draftNumber(value: string) {
 
 export default function Dashboard({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [tab, setTab] = useState<"overview" | "sources" | "quality" | "digest" | "deals" | "changes" | "listings" | "review">("overview");
+  const [tab, setTab] = useState<"overview" | "sources" | "quality" | "digest" | "followups" | "deals" | "changes" | "listings" | "review">("overview");
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("All sources");
   const [location, setLocation] = useState("All locations");
@@ -295,6 +368,10 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
   const [activeSavedSearchId, setActiveSavedSearchId] = useState<string | null>(null);
   const [enrichingPhotos, setEnrichingPhotos] = useState(false);
   const [photoEnrichmentNotice, setPhotoEnrichmentNotice] = useState("");
+  const [naturalQuery, setNaturalQuery] = useState("");
+  const [naturalCriteria, setNaturalCriteria] = useState<NaturalCriteria>(emptyNaturalCriteria);
+  const [naturalNotice, setNaturalNotice] = useState("");
+  const [followupView, setFollowupView] = useState<"all" | "overdue" | "today" | "upcoming" | "unscheduled">("all");
 
   const listings = data.listings;
   const savedSearches = useMemo(() => data.saved_searches ?? [], [data.saved_searches]);
@@ -417,6 +494,21 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       targets: inventory.filter((listing) => (listing.calculated_price_per_m2 ?? Infinity) <= 2300).length,
     };
   }).sort((a, b) => a.ageDays - b.ageDays), [sources, listings, data.scan_history, data.generated_at]);
+  const scannerChecks = useMemo(() => {
+    const failedPages = sourceHealth.reduce((sum, item) => sum + (item.latestScan?.pages_failed ?? 0), 0);
+    const blockedFeeds = sourceHealth.filter((item) => item.latestScan?.captcha_detected || item.latestScan?.blocking_detected || item.latestScan?.logout_detected);
+    const currentFeeds = sourceHealth.filter((item) => item.ageDays <= 1.5).length;
+    const staleFeeds = sourceHealth.filter((item) => item.ageDays > 4);
+    return [
+      { label: "Daily feed freshness", ok: currentFeeds > 0, detail: `${currentFeeds}/${sourceHealth.length} sources current` },
+      { label: "Page reliability", ok: failedPages === 0, detail: failedPages ? `${failedPages} latest-scan failures` : "No latest-scan failures" },
+      { label: "Access health", ok: blockedFeeds.length === 0, detail: blockedFeeds.length ? `${blockedFeeds.length} feed warnings` : "No CAPTCHA, block or logout flags" },
+      { label: "Duplicate processor", ok: !data.duplicate_refresh?.error_summary, detail: data.duplicate_refresh?.error_summary ? "Retry required" : "Processor healthy" },
+      { label: "Photo coverage", ok: qualityInventory.filter((listing) => listing.photo_urls?.length).length >= qualityInventory.length * .5, detail: `${qualityInventory.filter((listing) => listing.photo_urls?.length).length}/${qualityInventory.length} listings covered` },
+      { label: "Stale-source visibility", ok: true, detail: staleFeeds.length ? `${staleFeeds.length} baselines clearly marked` : "All sources recent" },
+    ];
+  }, [sourceHealth, data.duplicate_refresh?.error_summary, qualityInventory]);
+  const scannerReadiness = Math.round(scannerChecks.filter((item) => item.ok).length / scannerChecks.length * 100);
   const sourceQuality = useMemo(() => sources.slice(1).map((sourceName) => {
     const inventory = qualityInventory.filter((listing) => listing.source === sourceName);
     const count = (predicate: (listing: Listing) => boolean) => inventory.filter(predicate).length;
@@ -441,22 +533,69 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     (changeType === "All changes" || event.event_type === changeType)
     && (!watchlistAlertsOnly || favoriteIds.has(event.listing_id))
   ), [changesInWindow, changeType, watchlistAlertsOnly, favoriteIds]);
+  const recentReductionIds = useMemo(() => new Set((data.changes ?? []).filter((event) => event.event_type === "price_reduced" && new Date(data.generated_at).getTime() - new Date(event.observed_at).getTime() <= 30 * 86_400_000).map((event) => event.listing_id)), [data.changes, data.generated_at]);
+  const recentNewIds = useMemo(() => new Set((data.changes ?? []).filter((event) => event.event_type === "new" && new Date(data.generated_at).getTime() - new Date(event.observed_at).getTime() <= 7 * 86_400_000).map((event) => event.listing_id)), [data.changes, data.generated_at]);
+
+  const followupTasks = useMemo(() => {
+    const now = new Date(data.generated_at).getTime();
+    const dayStart = new Date(data.generated_at); dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = dayStart.getTime() + 86_400_000;
+    return listings.flatMap((listing) => {
+      const workflow = listing.workflow;
+      if (!workflow) return [];
+      const tasks: Array<{ id: string; listing: Listing; kind: "followup" | "viewing" | "action"; due: string | null; label: string; bucket: "overdue" | "today" | "upcoming" | "unscheduled" }> = [];
+      const addTimed = (kind: "followup" | "viewing", due: string | null, label: string) => {
+        if (!due) return;
+        const time = new Date(due).getTime();
+        const bucket = time < dayStart.getTime() ? "overdue" : time < dayEnd ? "today" : "upcoming";
+        tasks.push({ id: `${listing.id}-${kind}`, listing, kind, due, label, bucket });
+      };
+      addTimed("followup", workflow.follow_up_at, workflow.next_action || "Follow up with contact");
+      addTimed("viewing", workflow.viewing_at, "Property viewing");
+      if (workflow.next_action && !workflow.follow_up_at) tasks.push({ id: `${listing.id}-action`, listing, kind: "action", due: null, label: workflow.next_action, bucket: "unscheduled" });
+      if (["Contacted", "Viewing", "Negotiating"].includes(listing.current_status) && !workflow.next_action && !workflow.follow_up_at && !workflow.viewing_at) tasks.push({ id: `${listing.id}-action-needed`, listing, kind: "action", due: null, label: "Choose the next action", bucket: "unscheduled" });
+      return tasks;
+    }).sort((a, b) => (a.due ? new Date(a.due).getTime() : now + 365 * 86_400_000) - (b.due ? new Date(b.due).getTime() : now + 365 * 86_400_000));
+  }, [listings, data.generated_at]);
+  const visibleFollowups = useMemo(() => followupView === "all" ? followupTasks : followupTasks.filter((task) => task.bucket === followupView), [followupTasks, followupView]);
 
   const activeSavedSearch = useMemo(() => savedSearches.find((item) => item.id === activeSavedSearchId) ?? null, [savedSearches, activeSavedSearchId]);
+  const cheaperDuplicateIds = useMemo(() => {
+    const ids = new Set<string>();
+    activeDuplicates.forEach((candidate) => {
+      const a = listingById.get(candidate.listing_id_a); const b = listingById.get(candidate.listing_id_b);
+      if (!a?.price_value || !b?.price_value) return;
+      if (a.price_value < b.price_value) ids.add(a.id);
+      if (b.price_value < a.price_value) ids.add(b.id);
+    });
+    return ids;
+  }, [activeDuplicates, listingById]);
   const digestCards = useMemo(() => savedSearches.map((search) => {
     const days = search.digest_frequency === "weekly" ? 7 : 1;
     const cutoff = new Date(data.generated_at).getTime() - days * 86_400_000;
+    const previousCutoff = cutoff - days * 86_400_000;
     const events = (data.changes ?? []).filter((event) => new Date(event.observed_at).getTime() >= cutoff);
+    const previousEvents = (data.changes ?? []).filter((event) => { const time = new Date(event.observed_at).getTime(); return time >= previousCutoff && time < cutoff; });
     const eventByListing = new Map(events.map((event) => [event.listing_id, event]));
     const matching = listings.filter((listing) => matchesSavedSearch(listing, search));
     const recent = matching.filter((listing) => new Date(listing.first_seen_at).getTime() >= cutoff || eventByListing.has(listing.id))
-      .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+      .sort((a, b) => {
+        const signal = (listing: Listing) => Number(eventByListing.get(listing.id)?.event_type === "price_reduced") * 4 + Number(cheaperDuplicateIds.has(listing.id)) * 3 + Number(eventByListing.get(listing.id)?.event_type === "new") * 2 + (listing.total_score ?? 0) / 100;
+        return signal(b) - signal(a);
+      });
+    const noLongerMatches = events.flatMap((event) => {
+      const listing = listingById.get(event.listing_id);
+      if (!listing || matchesSavedSearch(listing, search)) return [];
+      const wasInsidePrice = search.max_price != null && event.previous_price != null && event.previous_price <= search.max_price;
+      return event.event_type === "removed" || wasInsidePrice ? [listing] : [];
+    });
     return {
-      search, matching, recent,
+      search, matching, recent, noLongerMatches,
       newCount: recent.filter((listing) => eventByListing.get(listing.id)?.event_type === "new" || new Date(listing.first_seen_at).getTime() >= cutoff).length,
       reducedCount: recent.filter((listing) => eventByListing.get(listing.id)?.event_type === "price_reduced").length,
+      previousActivity: new Set(previousEvents.map((event) => event.listing_id)).size,
     };
-  }), [savedSearches, listings, data.changes, data.generated_at]);
+  }), [savedSearches, listings, data.changes, data.generated_at, cheaperDuplicateIds, listingById]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -468,7 +607,23 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         || (priceBand === "€2,001–2,300/m²" && unitPrice != null && unitPrice > 2000 && unitPrice <= 2300)
         || (priceBand === "> €2,300/m²" && unitPrice != null && unitPrice > 2300)
         || (priceBand === "Price/area unresolved" && unitPrice == null);
+      const matchesNatural = (!naturalCriteria.locations.length || Boolean(l.normalized_location && naturalCriteria.locations.includes(l.normalized_location)))
+        && (!naturalCriteria.sources.length || naturalCriteria.sources.includes(l.source))
+        && (naturalCriteria.maxPrice == null || (l.price_value != null && l.price_value <= naturalCriteria.maxPrice))
+        && (naturalCriteria.maxPpsqm == null || (l.calculated_price_per_m2 != null && l.calculated_price_per_m2 <= naturalCriteria.maxPpsqm))
+        && (naturalCriteria.minBedrooms == null || (l.bedrooms != null && l.bedrooms >= naturalCriteria.minBedrooms))
+        && (!naturalCriteria.parking || l.parking === true || l.garage === true)
+        && (!naturalCriteria.seaView || l.sea_view === true)
+        && (!naturalCriteria.newConstruction || l.new_construction === true)
+        && (!naturalCriteria.ownerOnly || l.seller_type === "owner")
+        && (!naturalCriteria.reducedOnly || recentReductionIds.has(l.id))
+        && (!naturalCriteria.newOnly || recentNewIds.has(l.id))
+        && (!naturalCriteria.cleanOnly || l.clean_baseline_eligible)
+        && (!naturalCriteria.photos || Boolean(l.photo_urls?.length))
+        && (!naturalCriteria.furnished || l.furnished === true)
+        && (!naturalCriteria.elevator || l.elevator === true);
       return matchesQuery
+        && matchesNatural
         && (!activeSavedSearch || matchesSavedSearch(l, activeSavedSearch))
         && (source === "All sources" || l.source === source)
         && (location === "All locations" || l.normalized_location === location)
@@ -488,7 +643,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
       if (sort === "newest") return new Date(b.source_published_at ?? 0).getTime() - new Date(a.source_published_at ?? 0).getTime();
       return (b.total_score ?? 0) - (a.total_score ?? 0);
     });
-  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, photosOnly, favoritesOnly, qualityFilter, sort, data.generated_at, activeSavedSearch]);
+  }, [listings, query, source, location, status, priceBand, targetOnly, cleanOnly, issuesOnly, photosOnly, favoritesOnly, qualityFilter, sort, data.generated_at, activeSavedSearch, naturalCriteria, recentReductionIds, recentNewIds]);
 
   const opportunities = useMemo(() => listings
     .filter((l) => l.clean_baseline_eligible && (l.calculated_price_per_m2 ?? Infinity) <= 2300)
@@ -823,6 +978,23 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
     setPhotosOnly(false); setFavoritesOnly(false); setQualityFilter("all"); setTab("listings");
   };
 
+  const applyNaturalSearch = () => {
+    const parsed = parseNaturalSearch(naturalQuery, locations, sources);
+    const labels = naturalCriteriaLabels(parsed);
+    if (!labels.length) {
+      setNaturalNotice("I could not identify a property criterion yet. Try a location, budget, €/m², bedrooms or feature.");
+      return;
+    }
+    setNaturalCriteria(parsed);
+    setNaturalNotice(`${labels.length} criteria understood. You can inspect or clear each interpretation below.`);
+  };
+
+  const clearNaturalSearch = () => {
+    setNaturalCriteria(emptyNaturalCriteria);
+    setNaturalQuery("");
+    setNaturalNotice("");
+  };
+
   const enrichPhotos = async () => {
     setEnrichingPhotos(true);
     setPhotoEnrichmentNotice("");
@@ -865,9 +1037,10 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </div>
         <nav>
           <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><Icon>⌁</Icon><span>Market overview</span></button>
-          <button className={tab === "sources" ? "active" : ""} onClick={() => setTab("sources")}><Icon>◫</Icon><span>Source health</span><em>{sourceHealth.length}</em></button>
+          <button className={tab === "sources" ? "active" : ""} onClick={() => setTab("sources")}><Icon>◫</Icon><span>Scanner control</span><em>{scannerReadiness}%</em></button>
           <button className={tab === "quality" ? "active" : ""} onClick={() => setTab("quality")}><Icon>✓</Icon><span>Data quality</span><em>{qualityProblemCount}</em></button>
           <button className={tab === "digest" ? "active" : ""} onClick={() => setTab("digest")}><Icon>◉</Icon><span>Saved searches</span><em>{savedSearches.length}</em></button>
+          <button className={tab === "followups" ? "active" : ""} onClick={() => setTab("followups")}><Icon>◷</Icon><span>Follow-ups</span><em>{followupTasks.filter((task) => task.bucket === "overdue" || task.bucket === "today").length}</em></button>
           <button className={tab === "deals" ? "active" : ""} onClick={() => setTab("deals")}><Icon>★</Icon><span>Deals workspace</span><em>{dealListings.length}</em></button>
           <button className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}><Icon>↕</Icon><span>Alerts & changes</span><em>{changesInWindow.length}</em></button>
           <button className={tab === "listings" ? "active" : ""} onClick={() => setTab("listings")}><Icon>⌂</Icon><span>Listings</span><em>{trackedCount}</em></button>
@@ -882,7 +1055,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
 
       <main className="main">
         <header className="topbar">
-          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "sources" ? "Know what you can trust." : tab === "quality" ? "Make every record useful." : tab === "digest" ? "Let the market come to you." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
+          <div><p>ACQUISITION INTELLIGENCE</p><h1>{tab === "overview" ? "Good afternoon." : tab === "sources" ? "Know tomorrow’s scan is ready." : tab === "quality" ? "Make every record useful." : tab === "digest" ? "Let the market come to you." : tab === "followups" ? "Keep every deal moving." : tab === "deals" ? "Make the shortlist count." : tab === "changes" ? "See what moved." : tab === "listings" ? "Explore the market." : "Resolve what needs attention."}</h1></div>
           <div className="scan-chip"><span>Latest source scan</span><strong>{shortDate(data.latest_scan.started_at)}</strong><i>{sourceLabel(data.latest_scan.source)} · {data.latest_scan.pages_successful ?? "—"} opened · {data.latest_scan.pages_failed ?? "—"} failed</i></div>
         </header>
 
@@ -930,6 +1103,11 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </>}
 
         {tab === "sources" && <section className="source-workspace">
+          <div className="scanner-readiness">
+            <div className="scanner-score" style={{ background: `conic-gradient(#139477 ${scannerReadiness * 3.6}deg, #dfe7e1 0deg)` }}><div><strong>{scannerReadiness}%</strong><span>ready</span></div></div>
+            <div className="scanner-summary"><span>TOMORROW READINESS</span><h2>{scannerReadiness === 100 ? "All operational checks are green" : "The next scan is safe to run"}</h2><p>Live freshness, source reliability, access warnings, duplicate processing and photo coverage—without changing authentication or public access.</p></div>
+            <div className="scanner-checks">{scannerChecks.map((check) => <div className={check.ok ? "ok" : "attention"} key={check.label}><i>{check.ok ? "✓" : "!"}</i><span><strong>{check.label}</strong><small>{check.detail}</small></span></div>)}</div>
+          </div>
           <div className="workspace-head"><div><span>FEED COVERAGE & RELIABILITY</span><h2>{sourceHealth.length} approved market sources</h2><p>Freshness and data coverage are measured separately, so an older agency baseline never looks like a daily feed.</p></div><button className="source-view-all" onClick={() => { setSource("All sources"); setTab("listings"); }}>Explore all inventory →</button></div>
           <div className="source-health-grid">
             {sourceHealth.map((item) => {
@@ -941,6 +1119,7 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
                 <div className="source-health-head"><span className={`source-pill source-${item.source}`}>{sourceLabel(item.source)}</span><i className={`freshness ${freshness.toLowerCase()}`}>{freshness}</i></div>
                 <div className="source-health-total"><strong>{item.inventory}</strong><span>tracked listings</span></div>
                 <dl><div><dt>Latest scan</dt><dd>{shortDate(item.latestScan?.started_at)}</dd></div><div><dt>Page reliability</dt><dd>{item.reliability == null ? "—" : `${item.reliability.toFixed(1)}%`}</dd></div><div><dt>Target deals</dt><dd>{item.targets}</dd></div><div><dt>Scans stored</dt><dd>{(data.scan_history ?? []).filter((scan) => scan.source === item.source).length}</dd></div></dl>
+                <div className={item.latestScan?.error_summary || item.latestScan?.captcha_detected || item.latestScan?.blocking_detected || item.latestScan?.logout_detected ? "scan-status warning" : "scan-status healthy"}><span>{item.latestScan?.error_summary || item.latestScan?.captcha_detected || item.latestScan?.blocking_detected || item.latestScan?.logout_detected ? "Attention" : "Operational"}</span><small>{item.latestScan?.error_summary || (item.latestScan?.captcha_detected ? "CAPTCHA detected" : item.latestScan?.blocking_detected ? "Source blocking detected" : item.latestScan?.logout_detected ? "Source session logged out" : `${item.latestScan?.pages_successful ?? 0} pages opened successfully`)}</small></div>
                 <div className="coverage-list"><div><span>Clean pricing</span><b>{item.clean}/{item.inventory}</b><i><em style={{ width: `${cleanRate}%` }} /></i></div><div><span>Public contact</span><b>{item.contacts}/{item.inventory}</b><i><em style={{ width: `${contactRate}%` }} /></i></div><div><span>Photo gallery</span><b>{item.photos}/{item.inventory}</b><i><em style={{ width: `${photoRate}%` }} /></i></div></div>
                 <button onClick={() => { setSource(item.source); setTab("listings"); }}>View {sourceLabel(item.source)} listings →</button>
               </article>;
@@ -1013,13 +1192,32 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
           </article>
 
           {!digestCards.length && <div className="deals-empty digest-empty"><strong>No saved searches yet.</strong><p>Try a focused watch such as “Ilino, under €2,000/m², with parking.” The digest will immediately use the scan history already stored.</p></div>}
-          {digestCards.length > 0 && <div className="digest-grid">{digestCards.map(({ search, matching, recent, newCount, reducedCount }) => <article className="digest-card" key={search.id}>
+          {digestCards.length > 0 && <div className="digest-grid">{digestCards.map(({ search, matching, recent, newCount, reducedCount, previousActivity, noLongerMatches }) => <article className="digest-card" key={search.id}>
             <div className="digest-card-head"><div><span>{search.digest_frequency.toUpperCase()} DIGEST</span><h3>{search.name}</h3></div><button aria-label={`Remove ${search.name}`} onClick={() => deleteSearch(search.id)}>×</button></div>
             <div className="digest-stats"><div><strong>{recent.length}</strong><span>recent matches</span></div><div><strong>{newCount}</strong><span>new</span></div><div><strong>{reducedCount}</strong><span>reduced</span></div><div><strong>{matching.length}</strong><span>all matches</span></div></div>
+            <div className="digest-period"><span>{recent.length > previousActivity ? "↑" : recent.length < previousActivity ? "↓" : "→"} {Math.abs(recent.length - previousActivity)} vs previous {search.digest_frequency === "daily" ? "day" : "week"}</span>{noLongerMatches.length > 0 && <b>{noLongerMatches.length} no longer match</b>}</div>
             <div className="digest-criteria">{search.locations.map((item) => <span key={item}>{item}</span>)}{search.sources.map((item) => <span key={item}>{sourceLabel(item)}</span>)}{search.max_price != null && <span>≤ {money(search.max_price)}</span>}{search.max_price_per_m2 != null && <span>≤ {ppsqm(search.max_price_per_m2)}</span>}{search.min_bedrooms != null && <span>{search.min_bedrooms}+ bed</span>}{search.parking_required && <span>Parking</span>}{search.sea_view_required && <span>Sea view</span>}{search.photos_required && <span>Photos</span>}</div>
-            <div className="digest-results">{recent.slice(0, 3).map((listing) => <button key={listing.id} onClick={() => openListing(listing)}>{listing.photo_urls?.[0] ? <ListingImage className="digest-thumb" src={listing.photo_urls[0]} alt="" /> : <span className="digest-thumb remote-image-fallback">⌂</span>}<div><strong>{listing.title || `Listing #${listing.source_listing_id}`}</strong><small>{listing.normalized_location || "Unresolved"} · {money(listing.price_value)} · {ppsqm(listing.calculated_price_per_m2)}</small></div></button>)}{!recent.length && <p>No new or reduced matches in this window. The full matching inventory is still available.</p>}</div>
+            <div className="digest-results">{recent.slice(0, 3).map((listing) => <button key={listing.id} onClick={() => openListing(listing)}>{listing.photo_urls?.[0] ? <ListingImage className="digest-thumb" src={listing.photo_urls[0]} alt="" /> : <span className="digest-thumb remote-image-fallback">⌂</span>}<div><strong>{listing.title || `Listing #${listing.source_listing_id}`}</strong><small>{listing.normalized_location || "Unresolved"} · {money(listing.price_value)} · {ppsqm(listing.calculated_price_per_m2)}</small><i>{savedSearchReasons(listing, search).join(" · ") || "Matches all saved criteria"}</i></div></button>)}{!recent.length && <p>No new or reduced matches in this window. The full matching inventory is still available.</p>}</div>
             <button className="digest-open" onClick={() => applySavedSearch(search)}>Explore all {matching.length} matches →</button>
           </article>)}</div>}
+        </section>}
+
+        {tab === "followups" && <section className="followup-workspace">
+          <div className="workspace-head followup-head"><div><span>CRM FOLLOW-UP CENTER</span><h2>{followupTasks.length} active deal actions</h2><p>Viewings, timed follow-ups and unscheduled next actions collected from every saved deal plan.</p></div><button onClick={() => setTab("deals")}>Open deals workspace →</button></div>
+          <div className="followup-summary">
+            {(["overdue", "today", "upcoming", "unscheduled"] as const).map((bucket) => { const count = followupTasks.filter((task) => task.bucket === bucket).length; return <button className={followupView === bucket ? `active ${bucket}` : bucket} key={bucket} onClick={() => setFollowupView(bucket)}><span>{bucket === "overdue" ? "!" : bucket === "today" ? "●" : bucket === "upcoming" ? "→" : "?"}</span><strong>{count}</strong><small>{bucket}</small></button>; })}
+            <button className={followupView === "all" ? "active all" : "all"} onClick={() => setFollowupView("all")}><span>◎</span><strong>{followupTasks.length}</strong><small>all actions</small></button>
+          </div>
+          <div className="followup-board">
+            <article className="panel followup-list"><div className="panel-heading"><div><span>ACTION QUEUE</span><h2>{visibleFollowups.length} {followupView === "all" ? "current actions" : followupView}</h2></div><small>Ordered by urgency</small></div>
+              {visibleFollowups.map((task) => <button key={task.id} onClick={() => openListing(task.listing)}><span className={`followup-kind ${task.kind}`}>{task.kind === "viewing" ? "⌂" : task.kind === "followup" ? "☎" : "→"}</span><div><strong>{task.label}</strong><small>{task.listing.title || `Listing #${task.listing.source_listing_id}`} · {task.listing.normalized_location || sourceLabel(task.listing.source)}</small></div><div className="followup-due"><b className={task.bucket}>{task.bucket}</b><span>{task.due ? shortDate(task.due) : "No date"}</span></div></button>)}
+              {!visibleFollowups.length && <div className="empty">No actions are in this category.</div>}
+            </article>
+            <aside className="followup-guide">
+              <span>NEXT BEST ACTION</span><h2>{followupTasks[0]?.label || "Your CRM queue is clear"}</h2><p>{followupTasks[0] ? `${followupTasks[0].listing.title || `Listing #${followupTasks[0].listing.source_listing_id}`} is currently the most urgent item.` : "Add a follow-up date, viewing or next action inside any listing’s contact plan."}</p>
+              {followupTasks[0] && <><dl><div><dt>Status</dt><dd>{followupTasks[0].listing.current_status}</dd></div><div><dt>Contact</dt><dd>{contactParts(followupTasks[0].listing.public_contact).phones[0] || contactParts(followupTasks[0].listing.public_contact).emails[0] || "Not captured"}</dd></div><div><dt>Due</dt><dd>{followupTasks[0].due ? shortDate(followupTasks[0].due) : "Needs scheduling"}</dd></div><div><dt>Deal</dt><dd>{money(followupTasks[0].listing.price_value)}</dd></div></dl><button onClick={() => openListing(followupTasks[0].listing)}>Open action and contact plan →</button></>}
+            </aside>
+          </div>
         </section>}
 
         {tab === "deals" && <section className="deals-workspace">
@@ -1092,6 +1290,11 @@ export default function Dashboard({ initialData }: { initialData: DashboardData 
         </section>}
 
         {tab === "listings" && <section className="listing-workspace">
+          <div className="natural-search-panel">
+            <div><span>NATURAL-LANGUAGE SEARCH</span><h2>Describe the property you want</h2><p>Try “one-bedroom in Ilino below €120,000 with parking” or “price reductions under €2,000/m², owner only.”</p></div>
+            <form onSubmit={(event) => { event.preventDefault(); applyNaturalSearch(); }}><span>⌕</span><input value={naturalQuery} onChange={(event) => setNaturalQuery(event.target.value)} placeholder="Show me…" aria-label="Natural-language property search" /><button type="submit">Understand search</button></form>
+            {(naturalCriteriaLabels(naturalCriteria).length > 0 || naturalNotice) && <div className="natural-interpretation"><div><strong>UNDERSTOOD AS</strong>{naturalCriteriaLabels(naturalCriteria).map((label) => <span key={label}>{label}</span>)}</div><small>{naturalNotice}</small>{naturalCriteriaLabels(naturalCriteria).length > 0 && <button onClick={clearNaturalSearch}>Clear interpretation ×</button>}</div>}
+          </div>
           <div className="workspace-head"><div><span>LIVE INVENTORY</span><h2>{filtered.length} matching listings</h2></div><div className="workspace-actions"><p>Export respects every active filter.</p><button onClick={exportFilteredCsv}>⇩ Export {filtered.length} CSV</button></div></div>
           {activeSavedSearch && <div className="quality-filter-banner saved-search-banner"><div><span>SAVED SEARCH</span><strong>{activeSavedSearch.name}</strong><small>{activeSavedSearch.digest_frequency} market watch</small></div><button onClick={() => setActiveSavedSearchId(null)}>Clear saved search ×</button></div>}
           {qualityFilter !== "all" && <div className="quality-filter-banner"><div><span>DATA QUALITY FILTER</span><strong>{QUALITY_LABELS[qualityFilter]}</strong><small>{source === "All sources" ? "Across all sources" : sourceLabel(source)}</small></div><button onClick={() => setQualityFilter("all")}>Clear quality filter ×</button></div>}

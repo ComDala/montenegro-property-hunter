@@ -27,8 +27,33 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+*.har
+*cookies*.json
+*session*.json
+browser-profiles/
+
+# scanner output and production data
+data/
+exports/
+scans/
+*.csv
+*.jsonl
+*.zip
+*.exe
+*.db
+*.sqlite*
+*.dump
+*.backup
+
+# local Supabase state
+.supabase/
 
 # vercel
 .vercel
